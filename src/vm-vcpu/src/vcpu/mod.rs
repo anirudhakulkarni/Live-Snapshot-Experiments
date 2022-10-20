@@ -1,3 +1,4 @@
+
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // Copyright 2017 The Chromium OS Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
@@ -6,6 +7,7 @@ use libc::siginfo_t;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::io::{self, stdin};
+use std::{thread, time};
 use std::os::raw::c_int;
 use std::result;
 use std::sync::{Arc, Barrier, Condvar, Mutex};
@@ -686,22 +688,29 @@ impl KvmVcpu {
         self.init_tls()?;
 
         self.run_barrier.wait();
+        // let mut counter = 0;
+        
         'vcpu_run: loop {
+            println!("Entered next iter");
             let mut interrupted_by_signal = false;
             match self.vcpu_fd.run() {
                 Ok(exit_reason) => {
-                    // println!("{:#?}", exit_reason);
+                    // counter += 1;
+                    // println!("{:?}", exit_reason);
                     match exit_reason {
                         VcpuExit::Shutdown | VcpuExit::Hlt => {
-                            println!("Guest shutdown: {:?}. Bye!", exit_reason);
                             if stdin().lock().set_canon_mode().is_err() {
                                 eprintln!("Failed to set canon mode. Stdin will not echo.");
                             }
                             self.run_state.set_and_notify(VmRunState::Exiting);
                             break;
                         }
+                        VcpuExit::Intr => {
+                            println!("Interrupt received");
+                        }
                         VcpuExit::IoOut(addr, data) => {
                             if (0x3f8..(0x3f8 + 8)).contains(&addr) {
+                                // println!("IoOut event");
                                 // Write at the serial port.
                                 if self
                                     .device_mgr
@@ -734,6 +743,7 @@ impl KvmVcpu {
                         }
                         VcpuExit::IoIn(addr, data) => {
                             if (0x3f8..(0x3f8 + 8)).contains(&addr) {
+                                // println!("IoIn event");
                                 // Read from the serial port.
                                 if self
                                     .device_mgr
@@ -796,6 +806,7 @@ impl KvmVcpu {
                 Err(e) => {
                     // During boot KVM can exit with `EAGAIN`. In that case, do not
                     // terminate the run loop.
+                    println!("Received interrupt");
                     match e.errno() {
                         libc::EAGAIN => {}
                         libc::EINTR => {
@@ -822,6 +833,14 @@ impl KvmVcpu {
                         VmRunState::Suspending => {
                             // The VM is suspending. We run this loop until we get a different
                             // state.
+                            println!("CPU suspending");
+                            thread::sleep(time::Duration::from_secs(10));
+                            println!("CPU suspended now execute running");
+                            // FIXME: Assuming running over one vcpu
+                            *run_state_lock = VmRunState::Running;
+                            // self.run_state.set_and_notify(VmRunState::Running);
+                            println!("CPU running");
+                            break;
                         }
                         VmRunState::Exiting => {
                             // The VM is exiting. We also exit from this VCPU thread.
@@ -834,6 +853,7 @@ impl KvmVcpu {
                     run_state_lock = self.run_state.condvar.wait(run_state_lock).unwrap();
                 }
             }
+            println!("Out of signal loop");
         }
 
         Ok(())

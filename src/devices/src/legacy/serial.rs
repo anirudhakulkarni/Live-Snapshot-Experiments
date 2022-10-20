@@ -26,6 +26,7 @@ impl<T: Trigger, W: Write> MutEventSubscriber for SerialWrapper<T, NoEvents, W> 
         // Respond to stdin events.
         // `EventSet::IN` => send what's coming from stdin to the guest.
         // `EventSet::HANG_UP` or `EventSet::ERROR` => deregister the serial input.
+        // println!("Received an event from stdin");
         let mut out = [0u8; 32];
         match stdin().read(&mut out) {
             Err(e) => {

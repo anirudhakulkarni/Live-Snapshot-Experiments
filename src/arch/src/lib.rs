@@ -62,21 +62,29 @@ impl From<GuestMemoryError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// It contains info about the virtio device for fdt.
+struct DeviceInfo {
+    addr: u64,
+    size: u64,
+    irq: u32,
+}
+
 #[derive(Default)]
-pub struct FdtBuilder<'a> {
-    cmdline: Option<&'a str>,
+pub struct FdtBuilder {
+    cmdline: Option<String>,
     mem_size: Option<u64>,
     num_vcpus: Option<u32>,
     serial_console: Option<(u64, u64)>,
     rtc: Option<(u64, u64)>,
+    virtio_devices: Vec<DeviceInfo>,
 }
 
-impl<'a> FdtBuilder<'a> {
+impl FdtBuilder {
     pub fn new() -> Self {
         FdtBuilder::default()
     }
 
-    pub fn with_cmdline(&mut self, cmdline: &'a str) -> &mut Self {
+    pub fn with_cmdline(&mut self, cmdline: String) -> &mut Self {
         self.cmdline = Some(cmdline);
         self
     }
@@ -101,6 +109,15 @@ impl<'a> FdtBuilder<'a> {
         self
     }
 
+    pub fn add_virtio_device(&mut self, addr: u64, size: u64, irq: u32) -> &mut Self {
+        self.virtio_devices.push(DeviceInfo { addr, size, irq });
+        self
+    }
+
+    pub fn virtio_device_len(&self) -> usize {
+        self.virtio_devices.len()
+    }
+
     pub fn create_fdt(&self) -> Result<Fdt> {
         let mut fdt = FdtWriter::new()?;
 
@@ -114,6 +131,7 @@ impl<'a> FdtBuilder<'a> {
 
         let cmdline = self
             .cmdline
+            .as_ref()
             .ok_or_else(|| Error::MissingRequiredConfig("cmdline".to_owned()))?;
         create_chosen_node(&mut fdt, cmdline)?;
 
@@ -135,7 +153,9 @@ impl<'a> FdtBuilder<'a> {
         create_timer_node(&mut fdt, num_vcpus)?;
         create_psci_node(&mut fdt)?;
         create_pmu_node(&mut fdt, num_vcpus)?;
-
+        for info in &self.virtio_devices {
+            create_virtio_node(&mut fdt, info.addr, info.size, info.irq)?;
+        }
         fdt.end_node(root_node)?;
 
         Ok(Fdt {
@@ -318,18 +338,40 @@ fn create_rtc_node(fdt: &mut FdtWriter, rtc_addr: u64, size: u64) -> Result<()> 
     Ok(())
 }
 
+fn create_virtio_node(fdt: &mut FdtWriter, addr: u64, size: u64, irq: u32) -> Result<()> {
+    let virtio_mmio = fdt.begin_node(&format!("virtio_mmio@{:x}", addr))?;
+    fdt.property_string("compatible", "virtio,mmio")?;
+    fdt.property_array_u64("reg", &[addr, size])?;
+    fdt.property_array_u32(
+        "interrupts",
+        &[GIC_FDT_IRQ_TYPE_SPI, irq, IRQ_TYPE_EDGE_RISING],
+    )?;
+    fdt.property_array_u32("interrupt-parent", &[PHANDLE_GIC])?;
+    fdt.end_node(virtio_mmio)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::FdtBuilder;
 
     #[test]
+    fn test_adding_virtio() {
+        let mut fdt = FdtBuilder::new();
+        let fdt = fdt.add_virtio_device(0x1000, 1000, 5);
+        assert_eq!(fdt.virtio_devices.len(), 1);
+        assert_eq!(fdt.virtio_device_len(), 1);
+    }
+
+    #[test]
     fn test_create_fdt() {
         let fdt_ok = FdtBuilder::new()
-            .with_cmdline("reboot=t panic=1 pci=off")
+            .with_cmdline(String::from("reboot=t panic=1 pci=off"))
             .with_num_vcpus(8)
             .with_mem_size(4096)
             .with_serial_console(0x40000000, 0x1000)
             .with_rtc(0x40001000, 0x1000)
+            .add_virtio_device(0x1000, 1000, 5)
             .create_fdt();
         assert!(fdt_ok.is_ok());
 
@@ -342,7 +384,7 @@ mod tests {
         assert!(fdt_no_cmdline.is_err());
 
         let fdt_no_num_vcpus = FdtBuilder::new()
-            .with_cmdline("reboot=t panic=1 pci=off")
+            .with_cmdline(String::from("reboot=t panic=1 pci=off"))
             .with_mem_size(4096)
             .with_serial_console(0x40000000, 0x1000)
             .with_rtc(0x40001000, 0x1000)
@@ -350,7 +392,7 @@ mod tests {
         assert!(fdt_no_num_vcpus.is_err());
 
         let fdt_no_mem_size = FdtBuilder::new()
-            .with_cmdline("reboot=t panic=1 pci=off")
+            .with_cmdline(String::from("reboot=t panic=1 pci=off"))
             .with_num_vcpus(8)
             .with_serial_console(0x40000000, 0x1000)
             .with_rtc(0x40001000, 0x1000)

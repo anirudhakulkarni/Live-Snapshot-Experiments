@@ -1,12 +1,13 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 //! Reference VMM built with rust-vmm components and minimal glue.
-#![deny(missing_docs)]
+#[allow(missing_docs)]
 
 use std::convert::TryFrom;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
 use std::fs::File;
+use std::{thread, time};
 use std::io::{self, stdin, stdout};
 use std::ops::DerefMut;
 use std::path::PathBuf;
@@ -49,7 +50,7 @@ use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 use vm_superio::I8042Device;
 #[cfg(target_arch = "aarch64")]
 use vm_superio::Rtc;
-use vm_superio::Serial;
+use vm_superio::{Serial, Trigger};
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd, terminal::Terminal};
 
 #[cfg(target_arch = "x86_64")]
@@ -63,6 +64,7 @@ use devices::virtio::{Env, MmioConfig};
 use devices::legacy::I8042Wrapper;
 use devices::legacy::{EventFdTrigger, SerialWrapper};
 use vm_vcpu::vm::{self, ExitHandler, KvmVm, VmConfig};
+use vmm_sys_util::signal::{Killable, SIGRTMIN};
 
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::RtcWrapper;
@@ -70,14 +72,19 @@ use devices::legacy::RtcWrapper;
 #[cfg(target_arch = "aarch64")]
 use arch::{FdtBuilder, AARCH64_FDT_MAX_SIZE, AARCH64_MMIO_BASE, AARCH64_PHYS_MEM_START};
 
+use vm_allocator::{AddressAllocator, AllocPolicy, RangeInclusive};
+
 mod boot;
 mod config;
 
 /// First address past 32 bits is where the MMIO gap ends.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const MMIO_GAP_END: u64 = 1 << 32;
 /// Size of the MMIO gap.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const MMIO_GAP_SIZE: u64 = 768 << 20;
 /// The start of the MMIO gap (memory area reserved for MMIO devices).
+#[cfg(target_arch = "x86_64")]
 pub(crate) const MMIO_GAP_START: u64 = MMIO_GAP_END - MMIO_GAP_SIZE;
 /// Address of the zeropage, where Linux kernel boot parameters are written.
 #[cfg(target_arch = "x86_64")]
@@ -103,12 +110,18 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "panic=1 pci=off";
 #[cfg(target_arch = "aarch64")]
 /// Default kernel command line.
 pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=t panic=1 pci=off";
+/// Default address allocator alignment. It needs to be a power of 2.
+pub const DEFAULT_ADDRESSS_ALIGNEMNT: u64 = 4;
+/// Default allocation policy for address allocator.
+pub const DEFAULT_ALLOC_POLICY: AllocPolicy = AllocPolicy::FirstMatch;
 
 /// VMM memory related errors.
 #[derive(Debug)]
 pub enum MemoryError {
     /// Not enough memory slots.
     NotEnoughMemorySlots,
+    /// AddressAllocatorError
+    AddressAllocatorError(vm_allocator::Error),
     /// Failed to configure guest memory.
     VmMemory(vm_memory::Error),
 }
@@ -164,17 +177,85 @@ impl std::convert::From<vm::Error> for Error {
     }
 }
 
+impl From<vm_allocator::Error> for crate::Error {
+    fn from(error: vm_allocator::Error) -> Self {
+        crate::Error::Memory(MemoryError::AddressAllocatorError(error))
+    }
+}
+
 /// Dedicated [`Result`](https://doc.rust-lang.org/std/result/) type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 type Block = block::Block<Arc<GuestMemoryMmap>>;
 type Net = net::Net<Arc<GuestMemoryMmap>>;
 
+
+pub struct VmmInterruptHandler {
+    pub event_fd : EventFd,
+    // keep_running : AtomicBool,
+}
+
+// impl VmmInterruptHandler{
+//     fn new(interrupt_handler: EventFd) -> Self{
+//         VmmInterruptHandler{
+//             interrupt_handler
+//         }
+//     }
+// }
+#[derive(Clone)]
+pub struct WrappedInterruptHandler(pub Arc<Mutex<VmmInterruptHandler>>);
+
+impl WrappedInterruptHandler {
+    fn new() -> Result<WrappedInterruptHandler> {
+        Ok(WrappedInterruptHandler(Arc::new(Mutex::new(VmmInterruptHandler {
+            event_fd: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::ExitEvent)?,
+        }))))
+    }
+}
+
+pub struct InterruptDevice{
+    pub interrupt_handler: WrappedInterruptHandler,
+    pub interrupt_evt: EventFdTrigger
+}
+
+impl InterruptDevice {
+    fn new(interrupt_handler: WrappedInterruptHandler, interrupt_evt: EventFdTrigger) -> Self {
+        InterruptDevice{
+            interrupt_handler,
+            interrupt_evt
+        }
+    }
+}
+
+impl MutEventSubscriber for InterruptDevice {
+    fn process(&mut self, events: Events, ops: &mut EventOps) {
+        println!("Triggering interrupt");
+        if(events.event_set().contains(EventSet::IN)){
+            self.interrupt_evt.trigger();
+        }
+        if events.event_set().contains(EventSet::ERROR) {
+            // We cannot do much about the error (besides log it).
+            // TODO: log this error once we have a logger set up.
+            let _ = ops.remove(Events::new(&self.interrupt_handler.0.lock().unwrap().event_fd, EventSet::IN));
+        }
+
+    }
+    fn init(&mut self, ops: &mut EventOps) {
+        // Hook to stdin events.
+        let event_fd = &self.interrupt_handler.0.lock().unwrap().event_fd;
+        ops.add(Events::new(event_fd, EventSet::IN))
+            .expect("Failed to register interrupt event");
+    }
+}
+
+
+
 /// A live VMM.
 pub struct Vmm {
     vm: KvmVm<WrappedExitHandler>,
     kernel_cfg: KernelConfig,
     guest_memory: GuestMemoryMmap,
+    address_allocator: AddressAllocator,
     // The `device_mgr` is an Arc<Mutex> so that it can be shared between
     // the Vcpu threads, and modified when new devices are added.
     device_mgr: Arc<Mutex<IoManager>>,
@@ -185,11 +266,14 @@ pub struct Vmm {
     exit_handler: WrappedExitHandler,
     block_devices: Vec<Arc<Mutex<Block>>>,
     net_devices: Vec<Arc<Mutex<Net>>>,
+    wrapped_interrupt_handler: WrappedInterruptHandler,
     // TODO: fetch the vcpu number from the `vm` object.
     // TODO-continued: this is needed to make the arm POC work as we need to create the FDT
     // TODO-continued: after the other resources are created.
     #[cfg(target_arch = "aarch64")]
     num_vcpus: u64,
+    #[cfg(target_arch = "aarch64")]
+    fdt_builder: FdtBuilder,
 }
 
 // The `VmmExitHandler` is used as the mechanism for exiting from the event manager loop.
@@ -200,6 +284,8 @@ struct VmmExitHandler {
     exit_event: EventFd,
     keep_running: AtomicBool,
 }
+
+
 
 // The wrapped exit handler is needed because the ownership of the inner `VmmExitHandler` is
 // shared between the `KvmVm` and the `EventManager`. Clone is required for implementing the
@@ -258,12 +344,14 @@ impl TryFrom<VMMConfig> for Vmm {
         Vmm::check_kvm_capabilities(&kvm)?;
 
         let guest_memory = Vmm::create_guest_memory(&config.memory_config)?;
+        let address_allocator = Vmm::create_address_allocator(&config.memory_config)?;
         let device_mgr = Arc::new(Mutex::new(IoManager::new()));
 
         // Create the KvmVm.
         let vm_config = VmConfig::new(&kvm, config.vcpu_config.num)?;
 
         let wrapped_exit_handler = WrappedExitHandler::new()?;
+        let wrapped_interrupt_handler = WrappedInterruptHandler::new()?;
         let vm = KvmVm::new(
             &kvm,
             vm_config,
@@ -275,25 +363,31 @@ impl TryFrom<VMMConfig> for Vmm {
         let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber + Send>>>::new()
             .map_err(Error::EventManager)?;
         event_manager.add_subscriber(wrapped_exit_handler.0.clone());
+        #[cfg(target_arch = "aarch64")]
+        let fdt_builder = FdtBuilder::new();
 
         let mut vmm = Vmm {
             vm,
             guest_memory,
+            address_allocator,
             device_mgr,
             event_mgr: event_manager,
             kernel_cfg: config.kernel_config,
             exit_handler: wrapped_exit_handler,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
+            wrapped_interrupt_handler: wrapped_interrupt_handler.clone(),
             #[cfg(target_arch = "aarch64")]
             num_vcpus: config.vcpu_config.num as u64,
+            #[cfg(target_arch = "aarch64")]
+            fdt_builder,
         };
-
         vmm.add_serial_console()?;
+        vmm.add_interrupt_device(wrapped_interrupt_handler);
         #[cfg(target_arch = "x86_64")]
         vmm.add_i8042_device()?;
         #[cfg(target_arch = "aarch64")]
-        vmm.add_rtc_device();
+        vmm.add_rtc_device()?;
 
         // Adding the virtio devices. We'll come up with a cleaner abstraction for `Env`.
         if let Some(cfg) = config.block_config.as_ref() {
@@ -316,25 +410,29 @@ impl Vmm {
         let kernel_load_addr = self.compute_kernel_load_addr(&load_result)?;
         #[cfg(target_arch = "aarch64")]
         let kernel_load_addr = load_result.kernel_load;
-
         #[cfg(target_arch = "aarch64")]
         self.setup_fdt()?;
+
         if stdin().lock().set_raw_mode().is_err() {
             eprintln!("Failed to set raw mode on terminal. Stdin will echo.");
         }
-
+        let mut flag = 0;
         self.vm.run(Some(kernel_load_addr)).map_err(Error::Vm)?;
         loop {
             match self.event_mgr.run() {
                 Ok(_) => (),
                 Err(e) => eprintln!("Failed to handle events: {:?}", e),
             }
+            self.vm.interrupt_vcpus();
+            // self.wrapped_interrupt_handler.0.lock().unwrap().event_fd.write(1);
+            // self.vm.vm_fd().set_irq_line(10, true);
+            // self.vm.vm_fd().set_irq_line(10, false);
+            // println!("Outside match case");
             if !self.exit_handler.keep_running() {
                 break;
             }
         }
         self.vm.shutdown();
-
         Ok(())
     }
 
@@ -361,8 +459,19 @@ impl Vmm {
                 (GuestAddress(MMIO_GAP_END), remaining),
             ],
         }
+
         #[cfg(target_arch = "aarch64")]
         vec![(GuestAddress(AARCH64_PHYS_MEM_START), mem_size)]
+    }
+
+    fn create_address_allocator(memory_config: &MemoryConfig) -> Result<AddressAllocator> {
+        let mem_size = (memory_config.size_mib as u64) << 20;
+        #[cfg(target_arch = "x86_64")]
+        let start_addr = MMIO_GAP_START;
+        #[cfg(target_arch = "aarch64")]
+        let start_addr = AARCH64_MMIO_BASE;
+        let address_allocator = AddressAllocator::new(start_addr, mem_size)?;
+        Ok(address_allocator)
     }
 
     // Load the kernel into guest memory.
@@ -441,6 +550,21 @@ impl Vmm {
         .map_err(Error::KernelLoad)
     }
 
+    fn add_interrupt_device(&mut self, wrapped_interrupt_handler:WrappedInterruptHandler) -> Result<()>{
+        let interrupt_evt = match EventFdTrigger::new(libc::EFD_NONBLOCK).map_err(Error::IO){
+            Ok(trigger) => {
+                trigger
+            }
+            Err(_) => {
+                panic!("Error");
+            }
+        };
+        let interrupt_device = Arc::new(Mutex::new(InterruptDevice::new(wrapped_interrupt_handler, interrupt_evt.try_clone().map_err(Error::IO)?)));
+        self.vm.register_irqfd(&interrupt_evt, 10);
+        self.event_mgr.add_subscriber(interrupt_device);
+        Ok(())
+    }
+
     // Create and add a serial console to the VMM.
     fn add_serial_console(&mut self) -> Result<()> {
         // Create the serial console.
@@ -480,7 +604,14 @@ impl Vmm {
 
         #[cfg(target_arch = "aarch64")]
         {
-            let range = MmioRange::new(MmioAddress(AARCH64_MMIO_BASE), 0x1000).unwrap();
+            let range = self.address_allocator.allocate(
+                0x1000,
+                DEFAULT_ADDRESSS_ALIGNEMNT,
+                AllocPolicy::ExactMatch(AARCH64_MMIO_BASE),
+            )?;
+            self.fdt_builder
+                .with_serial_console(range.start(), range.len());
+            let range = mmio_from_range(&range);
             self.device_mgr
                 .lock()
                 .unwrap()
@@ -513,14 +644,21 @@ impl Vmm {
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn add_rtc_device(&mut self) {
+    fn add_rtc_device(&mut self) -> Result<()> {
         let rtc = Arc::new(Mutex::new(RtcWrapper(Rtc::new())));
-        let range = MmioRange::new(MmioAddress(AARCH64_MMIO_BASE + 0x1000), 0x1000).unwrap();
+        let range = self.address_allocator.allocate(
+            0x1000,
+            DEFAULT_ADDRESSS_ALIGNEMNT,
+            DEFAULT_ALLOC_POLICY,
+        )?;
+        self.fdt_builder.with_rtc(range.start(), range.len());
+        let range = mmio_from_range(&range);
         self.device_mgr
             .lock()
             .unwrap()
             .register_mmio(range, rtc)
             .unwrap();
+        Ok(())
     }
 
     // All methods that add a virtio device use hardcoded addresses and interrupts for now, and
@@ -529,9 +667,17 @@ impl Vmm {
     // the actual device types.
     fn add_block_device(&mut self, cfg: &BlockConfig) -> Result<()> {
         let mem = Arc::new(self.guest_memory.clone());
+        let range = self.address_allocator.allocate(
+            0x1000,
+            DEFAULT_ADDRESSS_ALIGNEMNT,
+            DEFAULT_ALLOC_POLICY,
+        )?;
 
-        let range = MmioRange::new(MmioAddress(MMIO_GAP_START), 0x1000).unwrap();
-        let mmio_cfg = MmioConfig { range, gsi: 5 };
+        let mmio_range = mmio_from_range(&range);
+        let mmio_cfg = MmioConfig {
+            range: mmio_range,
+            gsi: 5,
+        };
 
         let mut guard = self.device_mgr.lock().unwrap();
 
@@ -553,6 +699,9 @@ impl Vmm {
 
         // We can also hold this somewhere if we need to keep the handle for later.
         let block = Block::new(&mut env, &args).map_err(Error::Block)?;
+        #[cfg(target_arch = "aarch64")]
+        self.fdt_builder
+            .add_virtio_device(range.start(), range.len(), 5);
         self.block_devices.push(block);
 
         Ok(())
@@ -560,9 +709,16 @@ impl Vmm {
 
     fn add_net_device(&mut self, cfg: &NetConfig) -> Result<()> {
         let mem = Arc::new(self.guest_memory.clone());
-
-        let range = MmioRange::new(MmioAddress(MMIO_GAP_START + 0x2000), 0x1000).unwrap();
-        let mmio_cfg = MmioConfig { range, gsi: 6 };
+        let range = self.address_allocator.allocate(
+            0x1000,
+            DEFAULT_ADDRESSS_ALIGNEMNT,
+            DEFAULT_ALLOC_POLICY,
+        )?;
+        let mmio_range = mmio_from_range(&range);
+        let mmio_cfg = MmioConfig {
+            range: mmio_range,
+            gsi: 6,
+        };
 
         let mut guard = self.device_mgr.lock().unwrap();
 
@@ -582,7 +738,9 @@ impl Vmm {
         // We can also hold this somewhere if we need to keep the handle for later.
         let net = Net::new(&mut env, &args).map_err(Error::Net)?;
         self.net_devices.push(net);
-
+        #[cfg(target_arch = "aarch64")]
+        self.fdt_builder
+            .add_virtio_device(range.start(), range.len(), 6);
         Ok(())
     }
 
@@ -634,12 +792,12 @@ impl Vmm {
     fn setup_fdt(&mut self) -> Result<()> {
         let mem_size: u64 = self.guest_memory.iter().map(|region| region.len()).sum();
         let fdt_offset = mem_size - AARCH64_FDT_MAX_SIZE - 0x10000;
-        let fdt = FdtBuilder::new()
-            .with_cmdline(self.kernel_cfg.cmdline.as_str())
+        let cmdline = &self.kernel_cfg.cmdline;
+        let fdt = self
+            .fdt_builder
+            .with_cmdline(cmdline.as_str().to_string())
             .with_num_vcpus(self.num_vcpus.try_into().unwrap())
             .with_mem_size(mem_size)
-            .with_serial_console(0x40000000, 0x1000)
-            .with_rtc(0x40001000, 0x1000)
             .create_fdt()
             .map_err(Error::SetupFdt)?;
         fdt.write_to_mem(&self.guest_memory, fdt_offset)
@@ -648,6 +806,11 @@ impl Vmm {
     }
 }
 
+fn mmio_from_range(range: &RangeInclusive) -> MmioRange {
+    // The following unwrap is safe because the address allocator makes
+    // sure that the address is available and correct
+    MmioRange::new(MmioAddress(range.start()), range.len()).unwrap()
+}
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
@@ -728,41 +891,47 @@ mod tests {
             keep_running: AtomicBool::default(),
             exit_event: EventFd::new(libc::EFD_NONBLOCK).unwrap(),
         })))
+        
     }
 
     // Returns a VMM which only has the memory configured. The purpose of the mock VMM
     // is to give a finer grained control to test individual private functions in the VMM.
-    fn mock_vmm(vmm_config: VMMConfig) -> Vmm {
-        let kvm = Kvm::new().unwrap();
-        let guest_memory = Vmm::create_guest_memory(&vmm_config.memory_config).unwrap();
+    // fn mock_vmm(vmm_config: VMMConfig) -> Vmm {
+    //     let kvm = Kvm::new().unwrap();
+    //     let guest_memory = Vmm::create_guest_memory(&vmm_config.memory_config).unwrap();
 
-        // Create the KvmVm.
-        let vm_config = VmConfig::new(&kvm, vmm_config.vcpu_config.num).unwrap();
+    //     let address_allocator = Vmm::create_address_allocator(&vmm_config.memory_config).unwrap();
+    //     // Create the KvmVm.
+    //     let vm_config = VmConfig::new(&kvm, vmm_config.vcpu_config.num).unwrap();
 
-        let device_mgr = Arc::new(Mutex::new(IoManager::new()));
-        let exit_handler = default_exit_handler();
-        let vm = KvmVm::new(
-            &kvm,
-            vm_config,
-            &guest_memory,
-            exit_handler.clone(),
-            device_mgr.clone(),
-        )
-        .unwrap();
-
-        Vmm {
-            vm,
-            guest_memory,
-            device_mgr,
-            event_mgr: EventManager::new().unwrap(),
-            kernel_cfg: vmm_config.kernel_config,
-            exit_handler,
-            block_devices: Vec::new(),
-            net_devices: Vec::new(),
-            #[cfg(target_arch = "aarch64")]
-            num_vcpus: vmm_config.vcpu_config.num as u64,
-        }
-    }
+    //     let device_mgr = Arc::new(Mutex::new(IoManager::new()));
+    //     let exit_handler = default_exit_handler();
+    //     let vm = KvmVm::new(
+    //         &kvm,
+    //         vm_config,
+    //         &guest_memory,
+    //         exit_handler.clone(),
+    //         device_mgr.clone(),
+    //     )
+    //     .unwrap();
+    //     #[cfg(target_arch = "aarch64")]
+    //     let fdt_builder = FdtBuilder::new();
+    //     Vmm {
+    //         vm,
+    //         guest_memory,
+    //         address_allocator,
+    //         device_mgr,
+    //         event_mgr: EventManager::new().unwrap(),
+    //         kernel_cfg: vmm_config.kernel_config,
+    //         exit_handler,
+    //         block_devices: Vec::new(),
+    //         net_devices: Vec::new(),
+    //         #[cfg(target_arch = "aarch64")]
+    //         num_vcpus: vmm_config.vcpu_config.num as u64,
+    //         #[cfg(target_arch = "aarch64")]
+    //         fdt_builder,
+    //     }
+    // }
 
     // Return the address where an ELF file should be loaded, as specified in its header.
     #[cfg(target_arch = "x86_64")]
@@ -911,7 +1080,6 @@ mod tests {
         vmm_config.kernel_config.path = default_elf_path();
         let mut vmm = mock_vmm(vmm_config);
         assert_eq!(vmm.kernel_cfg.cmdline.as_str(), DEFAULT_KERNEL_CMDLINE);
-
         vmm.add_serial_console().unwrap();
         #[cfg(target_arch = "x86_64")]
         assert!(vmm.kernel_cfg.cmdline.as_str().contains("console=ttyS0"));
@@ -974,7 +1142,6 @@ mod tests {
             if e.kind() == ErrorKind::InvalidInput
         ));
     }
-
     #[test]
     fn test_create_vcpus() {
         // The scopes force the created vCPUs to unmap their kernel memory at the end.
@@ -1003,7 +1170,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
     // FIXME: We cannot run this on aarch64 because we do not have an image that just runs and
     // FIXME-continued: halts afterwards. Once we have this, we need to update `default_vmm_config`
     // FIXME-continued: and have a default PE image on aarch64.
@@ -1018,6 +1184,8 @@ mod tests {
 
         assert!(vmm.add_block_device(&block_config).is_ok());
         assert_eq!(vmm.block_devices.len(), 1);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(vmm.fdt_builder.virtio_device_len(), 1);
         assert!(vmm.kernel_cfg.cmdline.as_str().contains("virtio"));
 
         let invalid_block_config = BlockConfig {
@@ -1030,16 +1198,9 @@ mod tests {
         assert!(
             matches!(err, Error::Block(block::Error::OpenFile(io_err)) if io_err.kind() == ErrorKind::NotFound)
         );
-
-        // The current implementation of the VMM does not allow more than one block device
-        // as we are hard coding the `MmioConfig`.
-        // This currently fails because a device is already registered with the provided
-        // MMIO range.
-        assert!(vmm.add_block_device(&block_config).is_err());
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
     // FIXME: We cannot run this on aarch64 because we do not have an image that just runs and
     // FIXME-continued: halts afterwards. Once we have this, we need to update `default_vmm_config`
     // FIXME-continued: and have a default PE image on aarch64.
@@ -1056,15 +1217,9 @@ mod tests {
         {
             assert!(vmm.add_net_device(&cfg).is_ok());
             assert_eq!(vmm.net_devices.len(), 1);
+            #[cfg(target_arch = "aarch64")]
+            assert_eq!(vmm.fdt_builder.virtio_device_len(), 1);
             assert!(vmm.kernel_cfg.cmdline.as_str().contains("virtio"));
-        }
-
-        {
-            // The current implementation of the VMM does not allow more than one net device
-            // as we are hard coding the `MmioConfig`.
-            // This currently fails because a device is already registered with the provided
-            // MMIO range.
-            assert!(vmm.add_net_device(&cfg).is_err());
         }
     }
 
@@ -1082,8 +1237,10 @@ mod tests {
         {
             let mem_size: u64 = vmm.guest_memory.iter().map(|region| region.len()).sum();
             let fdt_offset = mem_size + AARCH64_FDT_MAX_SIZE;
-            let fdt = FdtBuilder::new()
-                .with_cmdline(vmm.kernel_cfg.cmdline.as_str())
+            let cmdline = &vmm.kernel_cfg.cmdline;
+            let fdt = vmm
+                .fdt_builder
+                .with_cmdline(cmdline.as_str().to_string())
                 .with_num_vcpus(vmm.num_vcpus.try_into().unwrap())
                 .with_mem_size(mem_size)
                 .with_serial_console(0x40000000, 0x1000)
@@ -1092,5 +1249,52 @@ mod tests {
                 .unwrap();
             assert!(fdt.write_to_mem(&vmm.guest_memory, fdt_offset).is_err());
         }
+    }
+    #[test]
+    fn test_address_alloc() {
+        let memory_config = MemoryConfig {
+            size_mib: MEM_SIZE_MIB,
+        };
+        #[cfg(target_arch = "x86_64")]
+        let start_addr = MMIO_GAP_START;
+        #[cfg(target_arch = "aarch64")]
+        let start_addr = AARCH64_MMIO_BASE;
+        let mut address_alloc = Vmm::create_address_allocator(&memory_config).unwrap();
+
+        // Trying to allocate at an address before the base address.
+        let alloc_err = address_alloc
+            .allocate(100, DEFAULT_ADDRESSS_ALIGNEMNT, AllocPolicy::ExactMatch(0))
+            .unwrap_err();
+        assert_eq!(alloc_err, vm_allocator::Error::ResourceNotAvailable);
+        let alloc_err = address_alloc
+            .allocate(
+                100,
+                DEFAULT_ADDRESSS_ALIGNEMNT,
+                AllocPolicy::ExactMatch(start_addr - DEFAULT_ADDRESSS_ALIGNEMNT),
+            )
+            .unwrap_err();
+        assert_eq!(alloc_err, vm_allocator::Error::ResourceNotAvailable);
+
+        // Testing it outside the available range
+        let outside_avail_range =
+            start_addr + ((MEM_SIZE_MIB as u64) << 20) + DEFAULT_ADDRESSS_ALIGNEMNT;
+        let alloc_err = address_alloc
+            .allocate(
+                100,
+                DEFAULT_ADDRESSS_ALIGNEMNT,
+                AllocPolicy::ExactMatch(outside_avail_range),
+            )
+            .unwrap_err();
+        assert_eq!(alloc_err, vm_allocator::Error::ResourceNotAvailable);
+
+        // Trying to add more than available range.
+        let alloc_err = address_alloc
+            .allocate(
+                ((MEM_SIZE_MIB as u64) << 20) + 2,
+                DEFAULT_ADDRESSS_ALIGNEMNT,
+                DEFAULT_ALLOC_POLICY,
+            )
+            .unwrap_err();
+        assert_eq!(alloc_err, vm_allocator::Error::ResourceNotAvailable);
     }
 }
