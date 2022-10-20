@@ -1,6 +1,7 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 //! Reference VMM built with rust-vmm components and minimal glue.
+use std::borrow::Borrow;
 #[allow(missing_docs)]
 
 use std::convert::TryFrom;
@@ -13,7 +14,7 @@ use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-
+use serde_json;
 use event_manager::{EventManager, EventOps, Events, MutEventSubscriber, SubscriberOps};
 use kvm_bindings::KVM_API_VERSION;
 use kvm_ioctls::{
@@ -45,7 +46,7 @@ use vm_device::device_manager::MmioManager;
 use vm_device::device_manager::PioManager;
 #[cfg(target_arch = "aarch64")]
 use vm_memory::GuestMemoryRegion;
-use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, FileOffset};
 #[cfg(target_arch = "x86_64")]
 use vm_superio::I8042Device;
 #[cfg(target_arch = "aarch64")]
@@ -161,6 +162,7 @@ pub enum Error {
     Memory(MemoryError),
     /// VM errors.
     Vm(vm::Error),
+    Snapshot,
     /// Exit event errors.
     ExitEvent(io::Error),
     #[cfg(target_arch = "x86_64")]
@@ -403,6 +405,40 @@ impl TryFrom<VMMConfig> for Vmm {
 }
 
 impl Vmm {
+
+    // create snapshot
+    pub fn save_snapshot(&mut self, snapshot_path: &str) -> Result<()> {
+        let mut snapshot_file = File::create(snapshot_path).map_err(Error::Snapshot)?;
+        // get state of vm
+        let vm_state = self.vm.get_state().map_err(Error::Snapshot)?;
+        // get state of guest memory
+        let fd=self.vm.vm_fd().borrow();
+        // dereference fd to get the file dat 
+        let memoryfile = unsafe { File::from_raw_fd(fd) };
+        // save vm state and memory state to snapshot file
+        serde_json::to_writer(&mut snapshot_file, &vm_state).map_err(Error::Snapshot)?;
+        memoryfile.write_to(&mut snapshot_file).map_err(Error::Snapshot)?;
+        Ok(())
+    }
+
+    // restore snapshot
+    pub fn restore_snapshot(&mut self, snapshot_path: &str) -> Result<(KvmVm<WrappedExitHandler>)> {
+        let mut snapshot_file = File::open(snapshot_path).map_err(Error::Snapshot)?;
+        // get state of vm
+        let vm_state: VmState = serde_json::from_reader(&mut snapshot_file).map_err(Error::Snapshot)?;
+        // get state of guest memory
+        let fd=self.vm.vm_fd().as_raw_fd();
+        // dereference fd to get the file dat 
+        // let memoryfile = unsafe { File::from_raw_fd(fd) };
+        let guest_memory = GuestMemoryMmap::from_ranges_with_files(&[(GuestAddress(0), 0x10000000, FileOffset::new(fd,0))]).map_err(Error::Snapshot)?;
+        // restore vm state and memory state from snapshot file
+        let io_manager = Arc::new(Mutex::new(IoManager::new()));
+        let exit_handler = WrappedExitHandler::default();
+        KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager)
+    }
+
+
+
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
         let load_result = self.load_kernel()?;
