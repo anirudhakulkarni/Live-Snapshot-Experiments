@@ -425,7 +425,7 @@ impl Vmm {
     pub fn restore_snapshot(&mut self, snapshot_path: &str) -> Result<(KvmVm<WrappedExitHandler>)> {
         let mut snapshot_file = File::open(snapshot_path).map_err(Error::Snapshot)?;
         // get state of vm
-        let vm_state: VmState = serde_json::from_reader(&mut snapshot_file).map_err(Error::Snapshot)?;
+        let vm_state = serde_json::from_reader(&mut snapshot_file).map_err(Error::Snapshot)?;
         // get state of guest memory
         let fd=self.vm.vm_fd().as_raw_fd();
         // dereference fd to get the file dat 
