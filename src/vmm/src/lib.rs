@@ -4,12 +4,15 @@
 use std::borrow::Borrow;
 #[allow(missing_docs)]
 
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
+
 use std::convert::TryFrom;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
 use std::fs::File;
-use std::{thread, time};
-use std::io::{self, stdin, stdout};
+use std::{thread, time, mem};
+use std::io::{self, stdin, stdout, BufReader, Read};
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,7 +67,7 @@ use devices::virtio::{Env, MmioConfig};
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::I8042Wrapper;
 use devices::legacy::{EventFdTrigger, SerialWrapper};
-use vm_vcpu::vm::{self, ExitHandler, KvmVm, VmConfig};
+use vm_vcpu::vm::{self, ExitHandler, KvmVm, VmConfig, VmState};
 use vmm_sys_util::signal::{Killable, SIGRTMIN};
 
 #[cfg(target_arch = "aarch64")]
@@ -351,7 +354,6 @@ impl TryFrom<VMMConfig> for Vmm {
 
         // Create the KvmVm.
         let vm_config = VmConfig::new(&kvm, config.vcpu_config.num)?;
-
         let wrapped_exit_handler = WrappedExitHandler::new()?;
         let wrapped_interrupt_handler = WrappedInterruptHandler::new()?;
         let vm = KvmVm::new(
@@ -408,33 +410,67 @@ impl Vmm {
 
     // create snapshot
     pub fn save_snapshot(&mut self, snapshot_path: &str) -> Result<()> {
-        let mut snapshot_file = File::create(snapshot_path).map_err(Error::Snapshot)?;
-        // get state of vm
-        let vm_state = self.vm.get_state().map_err(Error::Snapshot)?;
-        // get state of guest memory
-        let fd=self.vm.vm_fd().borrow();
-        // dereference fd to get the file dat 
-        let memoryfile = unsafe { File::from_raw_fd(fd) };
+
+        // TODO: map error
+        let mut snapshot_file = File::create(snapshot_path).unwrap();
+
+        let vm_state = self.vm.save_state().unwrap();
+        let state_size = mem::size_of::<VmState>();
+
+        let mut mem = vec![0; state_size];
+        let mut version_map = VersionMap::new();
+        version_map
+            .new_version() 
+            .set_type_version(VmState::type_id(), 1) 
+            .new_version() 
+            .set_type_version(VmState::type_id(), 1); 
+
+        vm_state
+            .serialize(&mut mem.as_mut_slice(), &version_map, 1)
+            .unwrap();
+
         // save vm state and memory state to snapshot file
-        serde_json::to_writer(&mut snapshot_file, &vm_state).map_err(Error::Snapshot)?;
-        memoryfile.write_to(&mut snapshot_file).map_err(Error::Snapshot)?;
+        serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
         Ok(())
     }
 
-    // restore snapshot
-    pub fn restore_snapshot(&mut self, snapshot_path: &str) -> Result<(KvmVm<WrappedExitHandler>)> {
-        let mut snapshot_file = File::open(snapshot_path).map_err(Error::Snapshot)?;
-        // get state of vm
-        let vm_state = serde_json::from_reader(&mut snapshot_file).map_err(Error::Snapshot)?;
-        // get state of guest memory
-        let fd=self.vm.vm_fd().as_raw_fd();
-        // dereference fd to get the file dat 
-        // let memoryfile = unsafe { File::from_raw_fd(fd) };
-        let guest_memory = GuestMemoryMmap::from_ranges_with_files(&[(GuestAddress(0), 0x10000000, FileOffset::new(fd,0))]).map_err(Error::Snapshot)?;
-        // restore vm state and memory state from snapshot file
+    // // restore snapshot
+    pub fn restore_snapshot(&mut self, snapshot_path: &str, mem_path: &str) -> Result<(KvmVm<WrappedExitHandler>)> {
+
+
+        let mut snapshot_file = File::open(snapshot_path).unwrap();
+        let mem_offset : u64= mem::size_of::<VmState>() as u64;
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .open(mem_path)
+            .unwrap();
+        
+        let mem_regions = &vec![(
+            GuestAddress(0), 
+            file.metadata().unwrap().len() as usize, 
+            Some(FileOffset::new(file, 0))
+        )];
+
+        let guest_memory = Self::get_guest_memory(mem_regions)?;
+
+        let mut version_map = VersionMap::new();
+        version_map
+            .new_version()
+            .set_type_version(VmState::type_id(), 1) 
+            .new_version() 
+            .set_type_version(VmState::type_id(),1);
+        
+        let mut bytes = Vec::new();
+        snapshot_file.read_to_end(&mut bytes).unwrap();
+        let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1);
+   
         let io_manager = Arc::new(Mutex::new(IoManager::new()));
         let exit_handler = WrappedExitHandler::default();
         KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager)
+
+
+        
     }
 
 
@@ -454,6 +490,7 @@ impl Vmm {
         }
         let mut flag = 0;
         self.vm.run(Some(kernel_load_addr)).map_err(Error::Vm)?;
+        print!("my memory is: {:?}",self.guest_memory);
         loop {
             match self.event_mgr.run() {
                 Ok(_) => (),
@@ -472,32 +509,60 @@ impl Vmm {
         Ok(())
     }
 
+    fn get_guest_memory(mem_regions: &Vec<(GuestAddress, usize, Option<FileOffset>)>) ->  Result<GuestMemoryMmap> {
+        GuestMemoryMmap::from_ranges_with_files(
+            mem_regions
+        )
+        .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
+    }
+
     // Create guest memory regions.
     fn create_guest_memory(memory_config: &MemoryConfig) -> Result<GuestMemoryMmap> {
         let mem_size = ((memory_config.size_mib as u64) << 20) as usize;
         let mem_regions = Vmm::create_memory_regions(mem_size);
 
         // Create guest memory from regions.
-        GuestMemoryMmap::from_ranges(&mem_regions)
-            .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
+        // GuestMemoryMmap::from_ranges(&mem_regions)
+        //     .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
+
+        GuestMemoryMmap::from_ranges_with_files(
+            mem_regions
+        )
+        .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
     }
 
-    fn create_memory_regions(mem_size: usize) -> Vec<(GuestAddress, usize)> {
+    fn create_memory_regions(mem_size: usize) -> Vec<(GuestAddress, usize, Option<FileOffset>)> {
         #[cfg(target_arch = "x86_64")]
         // On x86_64, they surround the MMIO gap (dedicated space for MMIO device slots) if the
         // configured memory size exceeds the latter's starting address.
+
+        
         match mem_size.checked_sub(MMIO_GAP_START as usize) {
             // Guest memory fits before the MMIO gap.
-            None | Some(0) => vec![(GuestAddress(0), mem_size)],
+            None | Some(0) =>
+                vec![(GuestAddress(0), mem_size, Some(Self::create_file("memory.txt", mem_size, 0).unwrap()))],
             // Guest memory extends beyond the MMIO gap.
-            Some(remaining) => vec![
-                (GuestAddress(0), MMIO_GAP_START as usize),
-                (GuestAddress(MMIO_GAP_END), remaining),
+            Some(remaining) => 
+            vec![
+                (GuestAddress(0), MMIO_GAP_START as usize, Some(Self::create_file("memory.txt", mem_size, 0).unwrap())),
+                (GuestAddress(MMIO_GAP_END), remaining, Some(Self::create_file("memory_mmio.txt", mem_size, 0).unwrap())),
             ],
         }
 
         #[cfg(target_arch = "aarch64")]
         vec![(GuestAddress(AARCH64_PHYS_MEM_START), mem_size)]
+    }
+
+    fn create_file(name: &str, mem_size: usize, start : u64) ->  Result<FileOffset>  {
+
+        // TODO: Do it with create
+        let mut f = File::options()
+        .read(true)
+        .write(true)
+        .open(name)
+        .unwrap();
+        f.set_len(mem_size as u64);
+        Ok(FileOffset::new(f, start))
     }
 
     fn create_address_allocator(memory_config: &MemoryConfig) -> Result<AddressAllocator> {
