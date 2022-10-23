@@ -435,7 +435,7 @@ impl Vmm {
     }
 
     // // restore snapshot
-    pub fn restore_snapshot(&mut self, snapshot_path: &str, mem_path: &str) -> Result<(KvmVm<WrappedExitHandler>)> {
+    pub fn restore_snapshot(&mut self, snapshot_path: &str, mem_path: &str) -> Result<KvmVm<WrappedExitHandler>> {
 
 
         let mut snapshot_file = File::open(snapshot_path).unwrap();
@@ -463,14 +463,19 @@ impl Vmm {
         
         let mut bytes = Vec::new();
         snapshot_file.read_to_end(&mut bytes).unwrap();
-        let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1);
+        let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap();
    
         let io_manager = Arc::new(Mutex::new(IoManager::new()));
-        let exit_handler = WrappedExitHandler::default();
-        KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager)
+        let exit_handler = WrappedExitHandler::new()?;
+        let kvm = Kvm::new().unwrap();
+        KvmVm::from_state(
+            &kvm, 
+            vm_state, 
+            &guest_memory, 
+            exit_handler, 
+            io_manager
+        )
 
-
-        
     }
 
 
