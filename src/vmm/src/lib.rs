@@ -15,7 +15,7 @@ use std::{thread, time, mem};
 use std::io::{self, stdin, stdout, BufReader, Read};
 use std::ops::DerefMut;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use serde_json;
 use event_manager::{EventManager, EventOps, Events, MutEventSubscriber, SubscriberOps};
@@ -165,7 +165,6 @@ pub enum Error {
     Memory(MemoryError),
     /// VM errors.
     Vm(vm::Error),
-    Snapshot,
     /// Exit event errors.
     ExitEvent(io::Error),
     #[cfg(target_arch = "x86_64")]
@@ -195,6 +194,35 @@ type Block = block::Block<Arc<GuestMemoryMmap>>;
 type Net = net::Net<Arc<GuestMemoryMmap>>;
 
 
+
+pub struct RpcController {
+    pub event_fd : EventFd,
+    pub pause_or_resume: AtomicU16,
+    pub cpu_snapshot_path: String,
+    pub memory_snapshot_path: String
+}
+
+impl RpcController {
+    fn new() -> RpcController {
+        RpcController {
+            event_fd: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::ExitEvent).unwrap(),
+            pause_or_resume: AtomicU16::new(0),
+            cpu_snapshot_path: "".to_string(),
+            memory_snapshot_path: "".to_string(),
+            // 0 mean nothing, 1 mean pause, 2 mean resume.
+        }
+    }
+    fn which_event(&self) -> &'static str{
+        let val = self.pause_or_resume.load(Ordering::Acquire);
+        if val == 1 {
+            return "PAUSE";
+        }
+        else if val == 2{
+            return "RESUME";
+        }
+        "5 star"
+    }
+}
 pub struct VmmInterruptHandler {
     pub event_fd : EventFd,
     // keep_running : AtomicBool,
@@ -253,6 +281,22 @@ impl MutEventSubscriber for InterruptDevice {
     }
 }
 
+impl MutEventSubscriber for RpcController {
+    fn process(&mut self, events: Events, ops: &mut EventOps) {
+        if events.event_set().contains(EventSet::IN) {
+            // do nothing eat 5 star.
+        }
+        if events.event_set().contains(EventSet::ERROR) {
+            // We cannot do much about the error (besides log it).
+            // TODO: log this error once we have a logger set up.
+            let _ = ops.remove(Events::new(&self.event_fd, EventSet::IN));
+        }
+    }
+    fn init(&mut self, ops: &mut EventOps) {
+        ops.add(Events::new(&self.event_fd, EventSet::IN))
+            .expect("Cannot initialize exit handler.");
+    }
+}
 
 
 /// A live VMM.
@@ -271,7 +315,7 @@ pub struct Vmm {
     exit_handler: WrappedExitHandler,
     block_devices: Vec<Arc<Mutex<Block>>>,
     net_devices: Vec<Arc<Mutex<Net>>>,
-    wrapped_interrupt_handler: WrappedInterruptHandler,
+    pub rpc_controller: Arc<Mutex<RpcController>>,
     // TODO: fetch the vcpu number from the `vm` object.
     // TODO-continued: this is needed to make the arm POC work as we need to create the FDT
     // TODO-continued: after the other resources are created.
@@ -339,15 +383,17 @@ impl TryFrom<VMMConfig> for Vmm {
     type Error = Error;
 
     fn try_from(config: VMMConfig) -> Result<Self> {
-        println!("Creating VMM");
         let kvm = Kvm::new().map_err(Error::KvmIoctl)?;
-        println!("Created KVM");
+
         // Check that the KVM on the host is supported.
         let kvm_api_ver = kvm.get_api_version();
         if kvm_api_ver != KVM_API_VERSION as i32 {
             return Err(Error::KvmApiVersion(kvm_api_ver));
         }
         Vmm::check_kvm_capabilities(&kvm)?;
+        
+        // NOTE: RPC event controller
+        let rpc_controller = Arc::new(Mutex::new(RpcController::new()));
 
         let guest_memory = Vmm::create_guest_memory(&config.memory_config)?;
         let address_allocator = Vmm::create_address_allocator(&config.memory_config)?;
@@ -355,8 +401,8 @@ impl TryFrom<VMMConfig> for Vmm {
 
         // Create the KvmVm.
         let vm_config = VmConfig::new(&kvm, config.vcpu_config.num)?;
+
         let wrapped_exit_handler = WrappedExitHandler::new()?;
-        let wrapped_interrupt_handler = WrappedInterruptHandler::new()?;
         let vm = KvmVm::new(
             &kvm,
             vm_config,
@@ -364,10 +410,12 @@ impl TryFrom<VMMConfig> for Vmm {
             wrapped_exit_handler.clone(),
             device_mgr.clone(),
         )?;
-        println!("Created VM");
+
         let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber + Send>>>::new()
             .map_err(Error::EventManager)?;
         event_manager.add_subscriber(wrapped_exit_handler.0.clone());
+        // NOTE: Register of rpc controller.
+        event_manager.add_subscriber(rpc_controller.clone());
         #[cfg(target_arch = "aarch64")]
         let fdt_builder = FdtBuilder::new();
 
@@ -381,14 +429,14 @@ impl TryFrom<VMMConfig> for Vmm {
             exit_handler: wrapped_exit_handler,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            wrapped_interrupt_handler: wrapped_interrupt_handler.clone(),
+            rpc_controller,
             #[cfg(target_arch = "aarch64")]
             num_vcpus: config.vcpu_config.num as u64,
             #[cfg(target_arch = "aarch64")]
             fdt_builder,
         };
         vmm.add_serial_console()?;
-        vmm.add_interrupt_device(wrapped_interrupt_handler);
+        // vmm.add_interrupt_device(wrapped_interrupt_handler);
         #[cfg(target_arch = "x86_64")]
         vmm.add_i8042_device()?;
         #[cfg(target_arch = "aarch64")]
@@ -409,8 +457,16 @@ impl TryFrom<VMMConfig> for Vmm {
 
 impl Vmm {
 
+    pub fn save_snapshot(&self, cpu_snapshot_path: String, memory_snapshot_path: String,  resume: bool){
+        if resume{
+            self.vm.snapshot_and_resume(cpu_snapshot_path, memory_snapshot_path);   
+        }
+        else {
+            self.vm.snapshot_and_pause(cpu_snapshot_path, memory_snapshot_path);
+        }
+    }
     // create snapshot
-    pub fn save_snapshot(&mut self, snapshot_path: &str) -> Result<()> {
+    pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
 
         // TODO: map error
         let mut snapshot_file = File::create(snapshot_path).unwrap();
@@ -484,7 +540,6 @@ impl Vmm {
 
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
-        println!("Running VMM");
         let load_result = self.load_kernel()?;
         #[cfg(target_arch = "x86_64")]
         let kernel_load_addr = self.compute_kernel_load_addr(&load_result)?;
@@ -496,19 +551,31 @@ impl Vmm {
         if stdin().lock().set_raw_mode().is_err() {
             eprintln!("Failed to set raw mode on terminal. Stdin will echo.");
         }
-        let mut flag = 0;
         self.vm.run(Some(kernel_load_addr)).map_err(Error::Vm)?;
-        print!("my memory is: {:?}",self.guest_memory);
+
         loop {
             match self.event_mgr.run() {
                 Ok(_) => (),
                 Err(e) => eprintln!("Failed to handle events: {:?}", e),
             }
-            self.vm.interrupt_vcpus();
-            // self.wrapped_interrupt_handler.0.lock().unwrap().event_fd.write(1);
-            // self.vm.vm_fd().set_irq_line(10, true);
-            // self.vm.vm_fd().set_irq_line(10, false);
-            // println!("Outside match case");
+            // NOTE: checking if need to snapshot or not
+            let rpc_controller = self.rpc_controller.lock().unwrap();
+            let cpu_snapshot_path = rpc_controller.cpu_snapshot_path.clone();
+            let memory_snapshot_path = rpc_controller.memory_snapshot_path.clone();
+            match rpc_controller.which_event() {
+                "PAUSE" => {
+                    self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, false);
+                    rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
+                },
+                "RESUME" => {
+                    self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, true);
+                    rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
+                }
+                _ => {
+                    // do nothing, eat 5 star.
+                }
+            }
+            // NOTE: Exit in other case, when kick() is called on exit handler
             if !self.exit_handler.keep_running() {
                 break;
             }
@@ -1005,42 +1072,43 @@ mod tests {
 
     // Returns a VMM which only has the memory configured. The purpose of the mock VMM
     // is to give a finer grained control to test individual private functions in the VMM.
-    // fn mock_vmm(vmm_config: VMMConfig) -> Vmm {
-    //     let kvm = Kvm::new().unwrap();
-    //     let guest_memory = Vmm::create_guest_memory(&vmm_config.memory_config).unwrap();
+    fn mock_vmm(vmm_config: VMMConfig) -> Vmm {
+        let kvm = Kvm::new().unwrap();
+        let guest_memory = Vmm::create_guest_memory(&vmm_config.memory_config).unwrap();
 
-    //     let address_allocator = Vmm::create_address_allocator(&vmm_config.memory_config).unwrap();
-    //     // Create the KvmVm.
-    //     let vm_config = VmConfig::new(&kvm, vmm_config.vcpu_config.num).unwrap();
+        let address_allocator = Vmm::create_address_allocator(&vmm_config.memory_config).unwrap();
+        // Create the KvmVm.
+        let vm_config = VmConfig::new(&kvm, vmm_config.vcpu_config.num).unwrap();
 
-    //     let device_mgr = Arc::new(Mutex::new(IoManager::new()));
-    //     let exit_handler = default_exit_handler();
-    //     let vm = KvmVm::new(
-    //         &kvm,
-    //         vm_config,
-    //         &guest_memory,
-    //         exit_handler.clone(),
-    //         device_mgr.clone(),
-    //     )
-    //     .unwrap();
-    //     #[cfg(target_arch = "aarch64")]
-    //     let fdt_builder = FdtBuilder::new();
-    //     Vmm {
-    //         vm,
-    //         guest_memory,
-    //         address_allocator,
-    //         device_mgr,
-    //         event_mgr: EventManager::new().unwrap(),
-    //         kernel_cfg: vmm_config.kernel_config,
-    //         exit_handler,
-    //         block_devices: Vec::new(),
-    //         net_devices: Vec::new(),
-    //         #[cfg(target_arch = "aarch64")]
-    //         num_vcpus: vmm_config.vcpu_config.num as u64,
-    //         #[cfg(target_arch = "aarch64")]
-    //         fdt_builder,
-    //     }
-    // }
+        let device_mgr = Arc::new(Mutex::new(IoManager::new()));
+        let exit_handler = default_exit_handler();
+        let vm = KvmVm::new(
+            &kvm,
+            vm_config,
+            &guest_memory,
+            exit_handler.clone(),
+            device_mgr.clone(),
+        )
+        .unwrap();
+        #[cfg(target_arch = "aarch64")]
+        let fdt_builder = FdtBuilder::new();
+        Vmm {
+            vm,
+            guest_memory,
+            address_allocator,
+            device_mgr,
+            event_mgr: EventManager::new().unwrap(),
+            kernel_cfg: vmm_config.kernel_config,
+            exit_handler,
+            block_devices: Vec::new(),
+            net_devices: Vec::new(),
+
+            #[cfg(target_arch = "aarch64")]
+            num_vcpus: vmm_config.vcpu_config.num as u64,
+            #[cfg(target_arch = "aarch64")]
+            fdt_builder,
+        }
+    }
 
     // Return the address where an ELF file should be loaded, as specified in its header.
     #[cfg(target_arch = "x86_64")]

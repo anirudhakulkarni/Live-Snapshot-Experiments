@@ -258,6 +258,18 @@ impl TryFrom<&str> for BlockConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SnapshotConfig {
+    cpu_snapshot_path: String,
+    memory_snapshot_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RpcConfig {
+    pub ip: String,
+    pub port: u16,
+}
+
 /// VMM configuration.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VMMConfig {
@@ -271,6 +283,10 @@ pub struct VMMConfig {
     pub net_config: Option<NetConfig>,
     /// Block device configuration.
     pub block_config: Option<BlockConfig>,
+    /// Snapshot configuration
+    pub snapshot_config: Option<SnapshotConfig>,
+    /// RPC configuration
+    pub rpc_config: Option<RpcConfig>
 }
 
 #[cfg(test)]
@@ -418,3 +434,4 @@ mod tests {
         assert!(MemoryConfig::try_from(memory_str).is_err());
     }
 }
+

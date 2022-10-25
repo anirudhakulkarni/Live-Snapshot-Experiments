@@ -5,6 +5,7 @@
 use std::io::{self, ErrorKind};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, JoinHandle};
+use std::sync::mpsc::{self, Receiver};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
@@ -81,6 +82,7 @@ pub struct KvmVm<EH: ExitHandler + Send> {
     exit_handler: EH,
     vcpu_barrier: Arc<Barrier>,
     vcpu_run_state: Arc<VcpuRunState>,
+    vcpu_rx: Option<Receiver<i32>>,
 
     #[cfg(target_arch = "aarch64")]
     gic: Option<Gic>,
@@ -210,7 +212,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             vcpu_handles: Vec::new(),
             exit_handler,
             vcpu_run_state,
-
+            vcpu_rx: None,
             #[cfg(target_arch = "aarch64")]
             gic: None,
         };
@@ -396,10 +398,13 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         vcpus_config: VcpuConfigList,
         memory: &M,
     ) -> Result<()> {
+        let (tx, rx) = mpsc::channel::<i32>();
+        self.vcpu_rx = Some(rx);
         self.vcpus = vcpus_config
             .configs
             .iter()
             .map(|config| {
+                let tx = tx.clone();
                 KvmVcpu::new(
                     &self.fd,
                     bus.clone(),
@@ -407,6 +412,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
                     self.vcpu_barrier.clone(),
                     self.vcpu_run_state.clone(),
                     memory,
+                    tx
                 )
             })
             .collect::<vcpu::Result<Vec<KvmVcpu>>>()
@@ -422,15 +428,19 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         bus: Arc<Mutex<IoManager>>,
         vcpus_state: Vec<VcpuState>,
     ) -> Result<()> {
+        let (tx, rx) = mpsc::channel::<i32>();
+        self.vcpu_rx = Some(rx);
         self.vcpus = vcpus_state
             .iter()
             .map(|state| {
+                let tx = tx.clone();
                 KvmVcpu::from_state::<M>(
                     &self.fd,
                     bus.clone(),
                     state.clone(),
                     self.vcpu_barrier.clone(),
                     self.vcpu_run_state.clone(),
+                    tx
                 )
             })
             .collect::<vcpu::Result<Vec<KvmVcpu>>>()
@@ -439,6 +449,58 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         Ok(())
     }
 
+
+    // FIXME: Take input parameter as file where it needs to be saved
+    pub fn snapshot_and_resume(&self, cpu_snapshot_path: String, memory_snapshot_path: String) {
+        // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+        self.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+        for handle in self.vcpu_handles.iter(){
+            let _ = handle.kill(SIGRTMIN() + 0);
+        }
+
+        for i in 0..self.config.num_vcpus {
+            let r = self.vcpu_rx.as_ref().unwrap();
+            r.recv().unwrap();
+            println!("Received message from {i}th cpu");
+        }
+    
+        // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
+        // let vcpu_state = self.vm.save_state().unwrap();
+
+        // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+
+        
+        // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
+        self.vcpu_run_state.set_and_notify(VmRunState::Running);
+    }
+
+    pub fn snapshot_and_pause(&self, cpu_snapshot_path: String, memory_snapshot_path: String) {
+        // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+        self.vcpu_run_state.set_and_notify(VmRunState::Exiting);
+        for handle in self.vcpu_handles.iter(){
+            let _ = handle.kill(SIGRTMIN() + 0);
+        }
+
+        for i in 0..self.config.num_vcpus {
+            let r = self.vcpu_rx.as_ref().unwrap();
+            match r.recv() {
+                Ok(_) => {
+                },
+                Err(e) => {
+                    println!("Error:{:?}", e);
+                }
+            }
+            println!("Received message from {i}th cpu");
+        }
+    
+        // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
+        // let vcpu_state = self.vm.save_state().unwrap();
+
+        // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+
+        // Now, make the vmm exit out of run loop
+        let _ = self.exit_handler.kick();
+    }
     pub fn interrupt_vcpus(&self) {
         for handle in self.vcpu_handles.iter(){
             self.vcpu_run_state.set_and_notify(VmRunState::Suspending);
@@ -495,7 +557,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             #[allow(clippy::identity_op)]
             let _ = handle.kill(SIGRTMIN() + 0);
             let _ = handle.join();
-        })
+        });
     }
     // pub fn get_memory_state<M: GuestMemory>(&self) -> Result<M> {
     //     // given fd, get the memory and convert it to GuestMemory
@@ -507,16 +569,9 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     ///
     /// If the VM is already paused, this is a no-op.
     pub fn pause(&mut self) -> Result<()> {
-        // collect cpu states
-        let vm = self.save_state()?;
-        // collect mem states
-        // let mem = self.get_memory_state()?;
         todo!();
     }
 
-    pub fn resume(&mut self) -> Result<()> {
-        todo!();
-    }
     #[cfg(target_arch = "aarch64")]
     pub fn save_state(&mut self) -> Result<VmState> {
         let vcpus_state = self
@@ -786,4 +841,4 @@ mod tests {
         let exit_handler = WrappedExitHandler::default();
         KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager).unwrap();
     }
-}
+ }
