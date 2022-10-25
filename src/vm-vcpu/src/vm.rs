@@ -5,6 +5,8 @@
 use std::io::{self, ErrorKind};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, JoinHandle};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "x86_64")]
@@ -28,7 +30,7 @@ use vm_vcpu_ref::aarch64::interrupts::{self, Gic, GicConfig, GicState};
 use vm_vcpu_ref::x86_64::mptable::{self, MpTable};
 
 /// Defines the configuration of this VM.
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VmConfig {
     pub num_vcpus: u8,
     pub vcpus_config: VcpuConfigList,
@@ -45,7 +47,7 @@ impl VmConfig {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VmState {
     pub pitstate: kvm_pit_state2,
     pub clock: kvm_clock_data,
@@ -495,14 +497,26 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             let _ = handle.join();
         })
     }
-
+    // pub fn get_memory_state<M: GuestMemory>(&self) -> Result<M> {
+    //     // given fd, get the memory and convert it to GuestMemory
+    //     // TODO: return memory state
+    //     Ok(M::new(&self.fd).map_err(Error::GetMemoryState)?) 
+    //     // let mem = M::from_fd(&self.fd, self.config.memory_size).map_err(Error::GetMemory)?;
+    // }
     /// Pause a running VM.
     ///
     /// If the VM is already paused, this is a no-op.
     pub fn pause(&mut self) -> Result<()> {
+        // collect cpu states
+        let vm = self.save_state()?;
+        // collect mem states
+        // let mem = self.get_memory_state()?;
         todo!();
     }
 
+    pub fn resume(&mut self) -> Result<()> {
+        todo!();
+    }
     #[cfg(target_arch = "aarch64")]
     pub fn save_state(&mut self) -> Result<VmState> {
         let vcpus_state = self
@@ -521,6 +535,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             gic_state,
         })
     }
+
 
     /// Retrieve the state of a `paused` VM.
     ///
@@ -750,6 +765,7 @@ mod tests {
 
         // Let's create a new VM from the previously saved state.
         let kvm = Kvm::new().unwrap();
+        // TODO: Assume that this is stateless for now.
         let io_manager = Arc::new(Mutex::new(IoManager::new()));
         let exit_handler = WrappedExitHandler::default();
         assert!(KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager).is_ok());

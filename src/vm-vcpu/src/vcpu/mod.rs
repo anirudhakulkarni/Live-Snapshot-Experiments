@@ -12,6 +12,9 @@ use std::os::raw::c_int;
 use std::result;
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
+
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
     kvm_debugregs, kvm_fpu, kvm_lapic_state, kvm_mp_state, kvm_regs, kvm_sregs, kvm_vcpu_events,
@@ -213,7 +216,7 @@ pub enum Error {
 /// Dedicated Result type.
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VcpuConfig {
     pub id: u8,
     #[cfg(target_arch = "x86_64")]
@@ -224,7 +227,7 @@ pub struct VcpuConfig {
     pub msrs: Msrs,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VcpuConfigList {
     pub configs: Vec<VcpuConfig>,
 }
@@ -270,7 +273,7 @@ impl VcpuConfigList {
 
 /// Structure holding the kvm state for an x86_64 VCPU.
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VcpuState {
     pub cpuid: CpuId,
     pub msrs: Msrs,
@@ -691,7 +694,7 @@ impl KvmVcpu {
         // let mut counter = 0;
         
         'vcpu_run: loop {
-            println!("Entered next iter");
+            // println!("Entered next iter");
             let mut interrupted_by_signal = false;
             match self.vcpu_fd.run() {
                 Ok(exit_reason) => {
@@ -834,7 +837,7 @@ impl KvmVcpu {
                             // The VM is suspending. We run this loop until we get a different
                             // state.
                             println!("CPU suspending");
-                            thread::sleep(time::Duration::from_secs(10));
+                            thread::sleep(time::Duration::from_secs(1));
                             println!("CPU suspended now execute running");
                             // FIXME: Assuming running over one vcpu
                             *run_state_lock = VmRunState::Running;
@@ -853,7 +856,7 @@ impl KvmVcpu {
                     run_state_lock = self.run_state.condvar.wait(run_state_lock).unwrap();
                 }
             }
-            println!("Out of signal loop");
+            // println!("Out of signal loop");
         }
 
         Ok(())
