@@ -296,7 +296,7 @@ struct VmmExitHandler {
 // shared between the `KvmVm` and the `EventManager`. Clone is required for implementing the
 // `ExitHandler` trait.
 #[derive(Clone)]
-struct WrappedExitHandler(Arc<Mutex<VmmExitHandler>>);
+pub struct WrappedExitHandler(Arc<Mutex<VmmExitHandler>>);
 
 impl WrappedExitHandler {
     fn new() -> Result<WrappedExitHandler> {
@@ -339,8 +339,9 @@ impl TryFrom<VMMConfig> for Vmm {
     type Error = Error;
 
     fn try_from(config: VMMConfig) -> Result<Self> {
+        println!("Creating VMM");
         let kvm = Kvm::new().map_err(Error::KvmIoctl)?;
-
+        println!("Created KVM");
         // Check that the KVM on the host is supported.
         let kvm_api_ver = kvm.get_api_version();
         if kvm_api_ver != KVM_API_VERSION as i32 {
@@ -363,7 +364,7 @@ impl TryFrom<VMMConfig> for Vmm {
             wrapped_exit_handler.clone(),
             device_mgr.clone(),
         )?;
-
+        println!("Created VM");
         let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber + Send>>>::new()
             .map_err(Error::EventManager)?;
         event_manager.add_subscriber(wrapped_exit_handler.0.clone());
@@ -435,7 +436,7 @@ impl Vmm {
     }
 
     // // restore snapshot
-    pub fn restore_snapshot(&mut self, snapshot_path: &str, mem_path: &str) -> Result<KvmVm<WrappedExitHandler>> {
+    pub fn restore_snapshot(&mut self, snapshot_path: &str, mem_path: &str) -> std::result::Result<KvmVm<WrappedExitHandler>, vm_vcpu::vm::Error>{
 
 
         let mut snapshot_file = File::open(snapshot_path).unwrap();
@@ -452,7 +453,7 @@ impl Vmm {
             Some(FileOffset::new(file, 0))
         )];
 
-        let guest_memory = Self::get_guest_memory(mem_regions)?;
+        let guest_memory = Self::get_guest_memory(mem_regions).unwrap();
 
         let mut version_map = VersionMap::new();
         version_map
@@ -466,7 +467,7 @@ impl Vmm {
         let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap();
    
         let io_manager = Arc::new(Mutex::new(IoManager::new()));
-        let exit_handler = WrappedExitHandler::new()?;
+        let exit_handler = WrappedExitHandler::new().unwrap();
         let kvm = Kvm::new().unwrap();
         KvmVm::from_state(
             &kvm, 
@@ -475,6 +476,7 @@ impl Vmm {
             exit_handler, 
             io_manager
         )
+        
 
     }
 
@@ -482,6 +484,7 @@ impl Vmm {
 
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
+        println!("Running VMM");
         let load_result = self.load_kernel()?;
         #[cfg(target_arch = "x86_64")]
         let kernel_load_addr = self.compute_kernel_load_addr(&load_result)?;
