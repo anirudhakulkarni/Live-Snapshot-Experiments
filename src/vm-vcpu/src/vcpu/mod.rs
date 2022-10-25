@@ -10,7 +10,7 @@ use std::io::{self, stdin};
 use std::{thread, time};
 use std::os::raw::c_int;
 use std::result;
-use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
 
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
@@ -322,6 +322,7 @@ pub struct KvmVcpu {
     config: VcpuConfig,
     run_barrier: Arc<Barrier>,
     pub(crate) run_state: Arc<VcpuRunState>,
+    tx: mpsc::Sender<i32>
 }
 
 impl KvmVcpu {
@@ -335,6 +336,7 @@ impl KvmVcpu {
         run_barrier: Arc<Barrier>,
         run_state: Arc<VcpuRunState>,
         memory: &M,
+        tx: mpsc::Sender<i32>
     ) -> Result<Self> {
         #[cfg(target_arch = "x86_64")]
         let vcpu;
@@ -349,6 +351,7 @@ impl KvmVcpu {
             config,
             run_barrier,
             run_state,
+            tx
         };
 
         #[cfg(target_arch = "x86_64")]
@@ -429,6 +432,7 @@ impl KvmVcpu {
         state: VcpuState,
         run_barrier: Arc<Barrier>,
         run_state: Arc<VcpuRunState>,
+        tx: mpsc::Sender<i32>
     ) -> Result<Self> {
         let mut vcpu = KvmVcpu {
             vcpu_fd: vm_fd
@@ -438,6 +442,7 @@ impl KvmVcpu {
             config: state.config.clone(),
             run_barrier,
             run_state,
+            tx
         };
 
         #[cfg(target_arch = "aarch64")]
@@ -691,7 +696,6 @@ impl KvmVcpu {
         // let mut counter = 0;
         
         'vcpu_run: loop {
-            println!("Entered next iter");
             let mut interrupted_by_signal = false;
             match self.vcpu_fd.run() {
                 Ok(exit_reason) => {
@@ -735,7 +739,7 @@ impl KvmVcpu {
                                 {
                                     debug!("Failed to write to i8042 port")
                                 }
-                            } else if (0x070..=0x07f).contains(&addr) {
+                            } else if (0x070..0x07f).contains(&addr) {
                                 // Write at the RTC port.
                             } else {
                                 // Write at some other port.
@@ -806,7 +810,6 @@ impl KvmVcpu {
                 Err(e) => {
                     // During boot KVM can exit with `EAGAIN`. In that case, do not
                     // terminate the run loop.
-                    println!("Received interrupt");
                     match e.errno() {
                         libc::EAGAIN => {}
                         libc::EINTR => {
@@ -826,23 +829,17 @@ impl KvmVcpu {
                 loop {
                     match *run_state_lock {
                         VmRunState::Running => {
+                            println!("Re-entered running state to resume execution");
                             // The VM state is running, so we need to exit from this loop,
                             // and enter the kvm run loop.
                             break;
                         }
                         VmRunState::Suspending => {
-                            // The VM is suspending. We run this loop until we get a different
-                            // state.
-                            println!("CPU suspending");
-                            thread::sleep(time::Duration::from_secs(10));
-                            println!("CPU suspended now execute running");
-                            // FIXME: Assuming running over one vcpu
-                            *run_state_lock = VmRunState::Running;
-                            // self.run_state.set_and_notify(VmRunState::Running);
-                            println!("CPU running");
-                            break;
+                            // The VM is suspending. It will send the message to VM to let it know I'm suspended and then I will sleep on condvar
+                            self.tx.send(self.config.id.into()).unwrap();
                         }
                         VmRunState::Exiting => {
+                            self.tx.send(self.config.id.into()).unwrap();
                             // The VM is exiting. We also exit from this VCPU thread.
                             break 'vcpu_run;
                         }
@@ -853,7 +850,6 @@ impl KvmVcpu {
                     run_state_lock = self.run_state.condvar.wait(run_state_lock).unwrap();
                 }
             }
-            println!("Out of signal loop");
         }
 
         Ok(())
