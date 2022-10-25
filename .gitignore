@@ -3,3 +3,5 @@ vmlinux-*
 bzimage-*
 *.ext4
 __pycache__
+Cargo.lock
+*.txt
