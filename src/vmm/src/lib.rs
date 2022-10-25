@@ -1,19 +1,23 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0 OR BSD-3-Clause
 //! Reference VMM built with rust-vmm components and minimal glue.
+use std::borrow::Borrow;
 #[allow(missing_docs)]
+
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 
 use std::convert::TryFrom;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
 use std::fs::File;
-use std::{thread, time};
-use std::io::{self, stdin, stdout};
+use std::{thread, time, mem};
+use std::io::{self, stdin, stdout, BufReader, Read};
 use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
-
+use serde_json;
 use event_manager::{EventManager, EventOps, Events, MutEventSubscriber, SubscriberOps};
 use kvm_bindings::KVM_API_VERSION;
 use kvm_ioctls::{
@@ -45,7 +49,7 @@ use vm_device::device_manager::MmioManager;
 use vm_device::device_manager::PioManager;
 #[cfg(target_arch = "aarch64")]
 use vm_memory::GuestMemoryRegion;
-use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, FileOffset};
 #[cfg(target_arch = "x86_64")]
 use vm_superio::I8042Device;
 #[cfg(target_arch = "aarch64")]
@@ -63,7 +67,7 @@ use devices::virtio::{Env, MmioConfig};
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::I8042Wrapper;
 use devices::legacy::{EventFdTrigger, SerialWrapper};
-use vm_vcpu::vm::{self, ExitHandler, KvmVm, VmConfig};
+use vm_vcpu::vm::{self, ExitHandler, KvmVm, VmConfig, VmState};
 use vmm_sys_util::signal::{Killable, SIGRTMIN};
 
 #[cfg(target_arch = "aarch64")]
@@ -219,6 +223,63 @@ impl RpcController {
         "5 star"
     }
 }
+pub struct VmmInterruptHandler {
+    pub event_fd : EventFd,
+    // keep_running : AtomicBool,
+}
+
+// impl VmmInterruptHandler{
+//     fn new(interrupt_handler: EventFd) -> Self{
+//         VmmInterruptHandler{
+//             interrupt_handler
+//         }
+//     }
+// }
+#[derive(Clone)]
+pub struct WrappedInterruptHandler(pub Arc<Mutex<VmmInterruptHandler>>);
+
+impl WrappedInterruptHandler {
+    fn new() -> Result<WrappedInterruptHandler> {
+        Ok(WrappedInterruptHandler(Arc::new(Mutex::new(VmmInterruptHandler {
+            event_fd: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::ExitEvent)?,
+        }))))
+    }
+}
+
+pub struct InterruptDevice{
+    pub interrupt_handler: WrappedInterruptHandler,
+    pub interrupt_evt: EventFdTrigger
+}
+
+impl InterruptDevice {
+    fn new(interrupt_handler: WrappedInterruptHandler, interrupt_evt: EventFdTrigger) -> Self {
+        InterruptDevice{
+            interrupt_handler,
+            interrupt_evt
+        }
+    }
+}
+
+impl MutEventSubscriber for InterruptDevice {
+    fn process(&mut self, events: Events, ops: &mut EventOps) {
+        println!("Triggering interrupt");
+        if(events.event_set().contains(EventSet::IN)){
+            self.interrupt_evt.trigger();
+        }
+        if events.event_set().contains(EventSet::ERROR) {
+            // We cannot do much about the error (besides log it).
+            // TODO: log this error once we have a logger set up.
+            let _ = ops.remove(Events::new(&self.interrupt_handler.0.lock().unwrap().event_fd, EventSet::IN));
+        }
+
+    }
+    fn init(&mut self, ops: &mut EventOps) {
+        // Hook to stdin events.
+        let event_fd = &self.interrupt_handler.0.lock().unwrap().event_fd;
+        ops.add(Events::new(event_fd, EventSet::IN))
+            .expect("Failed to register interrupt event");
+    }
+}
 
 impl MutEventSubscriber for RpcController {
     fn process(&mut self, events: Events, ops: &mut EventOps) {
@@ -236,6 +297,7 @@ impl MutEventSubscriber for RpcController {
             .expect("Cannot initialize exit handler.");
     }
 }
+
 
 /// A live VMM.
 pub struct Vmm {
@@ -278,7 +340,7 @@ struct VmmExitHandler {
 // shared between the `KvmVm` and the `EventManager`. Clone is required for implementing the
 // `ExitHandler` trait.
 #[derive(Clone)]
-struct WrappedExitHandler(Arc<Mutex<VmmExitHandler>>);
+pub struct WrappedExitHandler(Arc<Mutex<VmmExitHandler>>);
 
 impl WrappedExitHandler {
     fn new() -> Result<WrappedExitHandler> {
@@ -374,6 +436,7 @@ impl TryFrom<VMMConfig> for Vmm {
             fdt_builder,
         };
         vmm.add_serial_console()?;
+        // vmm.add_interrupt_device(wrapped_interrupt_handler);
         #[cfg(target_arch = "x86_64")]
         vmm.add_i8042_device()?;
         #[cfg(target_arch = "aarch64")]
@@ -402,6 +465,78 @@ impl Vmm {
             self.vm.snapshot_and_pause(cpu_snapshot_path, memory_snapshot_path);
         }
     }
+    // create snapshot
+    pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
+
+        // TODO: map error
+        let mut snapshot_file = File::create(snapshot_path).unwrap();
+
+        let vm_state = self.vm.save_state().unwrap();
+        let state_size = mem::size_of::<VmState>();
+
+        let mut mem = vec![0; state_size];
+        let mut version_map = VersionMap::new();
+        version_map
+            .new_version() 
+            .set_type_version(VmState::type_id(), 1) 
+            .new_version() 
+            .set_type_version(VmState::type_id(), 1); 
+
+        vm_state
+            .serialize(&mut mem.as_mut_slice(), &version_map, 1)
+            .unwrap();
+
+        // save vm state and memory state to snapshot file
+        serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
+        Ok(())
+    }
+
+    // // restore snapshot
+    pub fn restore_snapshot(&mut self, snapshot_path: &str, mem_path: &str) -> std::result::Result<KvmVm<WrappedExitHandler>, vm_vcpu::vm::Error>{
+
+
+        let mut snapshot_file = File::open(snapshot_path).unwrap();
+        let mem_offset : u64= mem::size_of::<VmState>() as u64;
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .open(mem_path)
+            .unwrap();
+        
+        let mem_regions = &vec![(
+            GuestAddress(0), 
+            file.metadata().unwrap().len() as usize, 
+            Some(FileOffset::new(file, 0))
+        )];
+
+        let guest_memory = Self::get_guest_memory(mem_regions).unwrap();
+
+        let mut version_map = VersionMap::new();
+        version_map
+            .new_version()
+            .set_type_version(VmState::type_id(), 1) 
+            .new_version() 
+            .set_type_version(VmState::type_id(),1);
+        
+        let mut bytes = Vec::new();
+        snapshot_file.read_to_end(&mut bytes).unwrap();
+        let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap();
+   
+        let io_manager = Arc::new(Mutex::new(IoManager::new()));
+        let exit_handler = WrappedExitHandler::new().unwrap();
+        let kvm = Kvm::new().unwrap();
+        KvmVm::from_state(
+            &kvm, 
+            vm_state, 
+            &guest_memory, 
+            exit_handler, 
+            io_manager
+        )
+        
+
+    }
+
+
 
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
@@ -449,32 +584,60 @@ impl Vmm {
         Ok(())
     }
 
+    fn get_guest_memory(mem_regions: &Vec<(GuestAddress, usize, Option<FileOffset>)>) ->  Result<GuestMemoryMmap> {
+        GuestMemoryMmap::from_ranges_with_files(
+            mem_regions
+        )
+        .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
+    }
+
     // Create guest memory regions.
     fn create_guest_memory(memory_config: &MemoryConfig) -> Result<GuestMemoryMmap> {
         let mem_size = ((memory_config.size_mib as u64) << 20) as usize;
         let mem_regions = Vmm::create_memory_regions(mem_size);
 
         // Create guest memory from regions.
-        GuestMemoryMmap::from_ranges(&mem_regions)
-            .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
+        // GuestMemoryMmap::from_ranges(&mem_regions)
+        //     .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
+
+        GuestMemoryMmap::from_ranges_with_files(
+            mem_regions
+        )
+        .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
     }
 
-    fn create_memory_regions(mem_size: usize) -> Vec<(GuestAddress, usize)> {
+    fn create_memory_regions(mem_size: usize) -> Vec<(GuestAddress, usize, Option<FileOffset>)> {
         #[cfg(target_arch = "x86_64")]
         // On x86_64, they surround the MMIO gap (dedicated space for MMIO device slots) if the
         // configured memory size exceeds the latter's starting address.
+
+        
         match mem_size.checked_sub(MMIO_GAP_START as usize) {
             // Guest memory fits before the MMIO gap.
-            None | Some(0) => vec![(GuestAddress(0), mem_size)],
+            None | Some(0) =>
+                vec![(GuestAddress(0), mem_size, Some(Self::create_file("memory.txt", mem_size, 0).unwrap()))],
             // Guest memory extends beyond the MMIO gap.
-            Some(remaining) => vec![
-                (GuestAddress(0), MMIO_GAP_START as usize),
-                (GuestAddress(MMIO_GAP_END), remaining),
+            Some(remaining) => 
+            vec![
+                (GuestAddress(0), MMIO_GAP_START as usize, Some(Self::create_file("memory.txt", mem_size, 0).unwrap())),
+                (GuestAddress(MMIO_GAP_END), remaining, Some(Self::create_file("memory_mmio.txt", mem_size, 0).unwrap())),
             ],
         }
 
         #[cfg(target_arch = "aarch64")]
         vec![(GuestAddress(AARCH64_PHYS_MEM_START), mem_size)]
+    }
+
+    fn create_file(name: &str, mem_size: usize, start : u64) ->  Result<FileOffset>  {
+
+        // TODO: Do it with create
+        let mut f = File::options()
+        .read(true)
+        .write(true)
+        .open(name)
+        .unwrap();
+        f.set_len(mem_size as u64);
+        Ok(FileOffset::new(f, start))
     }
 
     fn create_address_allocator(memory_config: &MemoryConfig) -> Result<AddressAllocator> {
@@ -561,6 +724,21 @@ impl Vmm {
             None,
         )
         .map_err(Error::KernelLoad)
+    }
+
+    fn add_interrupt_device(&mut self, wrapped_interrupt_handler:WrappedInterruptHandler) -> Result<()>{
+        let interrupt_evt = match EventFdTrigger::new(libc::EFD_NONBLOCK).map_err(Error::IO){
+            Ok(trigger) => {
+                trigger
+            }
+            Err(_) => {
+                panic!("Error");
+            }
+        };
+        let interrupt_device = Arc::new(Mutex::new(InterruptDevice::new(wrapped_interrupt_handler, interrupt_evt.try_clone().map_err(Error::IO)?)));
+        self.vm.register_irqfd(&interrupt_evt, 10);
+        self.event_mgr.add_subscriber(interrupt_device);
+        Ok(())
     }
 
     // Create and add a serial console to the VMM.
@@ -809,7 +987,6 @@ fn mmio_from_range(range: &RangeInclusive) -> MmioRange {
     // sure that the address is available and correct
     MmioRange::new(MmioAddress(range.start()), range.len()).unwrap()
 }
-/*
 #[cfg(test)]
 mod tests {
     use std::io::ErrorKind;
@@ -1298,5 +1475,3 @@ mod tests {
         assert_eq!(alloc_err, vm_allocator::Error::ResourceNotAvailable);
     }
 }
-
-*/

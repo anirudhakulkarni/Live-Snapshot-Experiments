@@ -6,6 +6,8 @@ use std::io::{self, ErrorKind};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, JoinHandle};
 use std::sync::mpsc::{self, Receiver};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 
 use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(target_arch = "x86_64")]
@@ -29,7 +31,7 @@ use vm_vcpu_ref::aarch64::interrupts::{self, Gic, GicConfig, GicState};
 use vm_vcpu_ref::x86_64::mptable::{self, MpTable};
 
 /// Defines the configuration of this VM.
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VmConfig {
     pub num_vcpus: u8,
     pub vcpus_config: VcpuConfigList,
@@ -46,7 +48,7 @@ impl VmConfig {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VmState {
     pub pitstate: kvm_pit_state2,
     pub clock: kvm_clock_data,
@@ -499,6 +501,12 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         // Now, make the vmm exit out of run loop
         let _ = self.exit_handler.kick();
     }
+    pub fn interrupt_vcpus(&self) {
+        for handle in self.vcpu_handles.iter(){
+            self.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+            let _ = handle.kill(SIGRTMIN() + 0);
+        }
+    }
 
     /// Let KVM know that instead of triggering an actual interrupt for `irq_number`, we will
     /// just write on the specified `event`.
@@ -551,7 +559,12 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             let _ = handle.join();
         });
     }
-
+    // pub fn get_memory_state<M: GuestMemory>(&self) -> Result<M> {
+    //     // given fd, get the memory and convert it to GuestMemory
+    //     // TODO: return memory state
+    //     Ok(M::new(&self.fd).map_err(Error::GetMemoryState)?) 
+    //     // let mem = M::from_fd(&self.fd, self.config.memory_size).map_err(Error::GetMemory)?;
+    // }
     /// Pause a running VM.
     ///
     /// If the VM is already paused, this is a no-op.
@@ -577,6 +590,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             gic_state,
         })
     }
+
 
     /// Retrieve the state of a `paused` VM.
     ///
@@ -632,197 +646,199 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-//     use crate::vm::{Error, KvmVm, VmConfig};
-//     #[cfg(target_arch = "x86_64")]
-//     use vm_vcpu_ref::x86_64::mptable::MAX_SUPPORTED_CPUS;
+    use crate::vm::{Error, KvmVm, VmConfig};
+    #[cfg(target_arch = "x86_64")]
+    use vm_vcpu_ref::x86_64::mptable::MAX_SUPPORTED_CPUS;
 
-//     use std::sync::atomic::{AtomicBool, Ordering};
-//     use std::thread::sleep;
-//     use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::sleep;
+    use std::time::Duration;
 
-//     #[cfg(target_arch = "x86_64")]
-//     use kvm_bindings::bindings::kvm_regs;
-//     use kvm_ioctls::Kvm;
-//     use vm_memory::{Bytes, GuestAddress};
+    #[cfg(target_arch = "x86_64")]
+    use kvm_bindings::bindings::kvm_regs;
+    use kvm_ioctls::Kvm;
+    use vm_memory::{Bytes, GuestAddress};
 
-//     type GuestMemoryMmap = vm_memory::GuestMemoryMmap<()>;
+    type GuestMemoryMmap = vm_memory::GuestMemoryMmap<()>;
 
-//     #[derive(Clone, Default)]
-//     struct WrappedExitHandler(Arc<DummyExitHandler>);
+    #[derive(Clone, Default)]
+    struct WrappedExitHandler(Arc<DummyExitHandler>);
 
-//     #[derive(Default)]
-//     struct DummyExitHandler {
-//         kicked: AtomicBool,
-//     }
+    #[derive(Default)]
+    struct DummyExitHandler {
+        kicked: AtomicBool,
+    }
 
-//     impl ExitHandler for WrappedExitHandler {
-//         fn kick(&self) -> io::Result<()> {
-//             self.0.kicked.store(true, Ordering::Release);
-//             Ok(())
-//         }
-//     }
+    impl ExitHandler for WrappedExitHandler {
+        fn kick(&self) -> io::Result<()> {
+            self.0.kicked.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
 
-//     fn default_memory() -> GuestMemoryMmap {
-//         let mem_size = 1024 << 20;
-//         GuestMemoryMmap::from_ranges(&[(GuestAddress(0), mem_size)]).unwrap()
-//     }
+    fn default_memory() -> GuestMemoryMmap {
+        let mem_size = 1024 << 20;
+        GuestMemoryMmap::from_ranges(&[(GuestAddress(0), mem_size)]).unwrap()
+    }
 
-//     fn default_vm(
-//         kvm: &Kvm,
-//         guest_memory: &GuestMemoryMmap,
-//         num_vcpus: u8,
-//     ) -> Result<KvmVm<WrappedExitHandler>> {
-//         let vm_config = VmConfig::new(kvm, num_vcpus).unwrap();
-//         let io_manager = Arc::new(Mutex::new(IoManager::new()));
-//         let exit_handler = WrappedExitHandler::default();
-//         let vm = KvmVm::new(kvm, vm_config, guest_memory, exit_handler, io_manager)?;
+    fn default_vm(
+        kvm: &Kvm,
+        guest_memory: &GuestMemoryMmap,
+        num_vcpus: u8,
+    ) -> Result<KvmVm<WrappedExitHandler>> {
+        let vm_config = VmConfig::new(kvm, num_vcpus).unwrap();
+        let io_manager = Arc::new(Mutex::new(IoManager::new()));
+        let exit_handler = WrappedExitHandler::default();
+        let vm = KvmVm::new(kvm, vm_config, guest_memory, exit_handler, io_manager)?;
 
-//         assert_eq!(vm.vcpus.len() as u8, num_vcpus);
-//         assert_eq!(vm.vcpu_handles.len() as u8, 0);
+        assert_eq!(vm.vcpus.len() as u8, num_vcpus);
+        assert_eq!(vm.vcpu_handles.len() as u8, 0);
 
-//         Ok(vm)
-//     }
+        Ok(vm)
+    }
 
-//     fn create_vm_and_vcpus(
-//         num_vcpus: u8,
-//         guest_memory: &mut GuestMemoryMmap,
-//     ) -> KvmVm<WrappedExitHandler> {
-//         let kvm = Kvm::new().unwrap();
-//         default_vm(&kvm, guest_memory, num_vcpus).unwrap()
-//     }
+    fn create_vm_and_vcpus(
+        num_vcpus: u8,
+        guest_memory: &mut GuestMemoryMmap,
+    ) -> KvmVm<WrappedExitHandler> {
+        let kvm = Kvm::new().unwrap();
+        default_vm(&kvm, guest_memory, num_vcpus).unwrap()
+    }
 
-    // #[test]
-    // #[cfg(target_arch = "x86_64")]
-    // fn test_failed_setup_mptable() {
-    //     let num_vcpus = (MAX_SUPPORTED_CPUS + 1) as u8;
-    //     let kvm = Kvm::new().unwrap();
-    //     let guest_memory = default_memory();
-    //     let res = default_vm(&kvm, &guest_memory, num_vcpus);
-    //     assert!(matches!(res, Err(Error::Mptable(_))));
-    // }
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn test_failed_setup_mptable() {
+        let num_vcpus = (MAX_SUPPORTED_CPUS + 1) as u8;
+        let kvm = Kvm::new().unwrap();
+        let guest_memory = default_memory();
+        let res = default_vm(&kvm, &guest_memory, num_vcpus);
+        assert!(matches!(res, Err(Error::Mptable(_))));
+    }
 
-    // #[test]
-    // fn test_failed_setup_memory() {
-    //     let kvm = Kvm::new().unwrap();
+    #[test]
+    fn test_failed_setup_memory() {
+        let kvm = Kvm::new().unwrap();
 
-    //     // Create nr_slots non overlapping regions of length 100.
-    //     let nr_slots: u64 = (kvm.get_nr_memslots() + 1) as u64;
-    //     let mut ranges = Vec::<(GuestAddress, usize)>::new();
-    //     for i in 0..nr_slots {
-    //         ranges.push((GuestAddress(i * 100), 100))
-    //     }
-    //     let guest_memory = GuestMemoryMmap::from_ranges(&ranges).unwrap();
+        // Create nr_slots non overlapping regions of length 100.
+        let nr_slots: u64 = (kvm.get_nr_memslots() + 1) as u64;
+        let mut ranges = Vec::<(GuestAddress, usize)>::new();
+        for i in 0..nr_slots {
+            ranges.push((GuestAddress(i * 100), 100))
+        }
+        let guest_memory = GuestMemoryMmap::from_ranges(&ranges).unwrap();
 
-    //     let res = default_vm(&kvm, &guest_memory, 1);
-    //     assert!(matches!(res, Err(Error::NotEnoughMemorySlots)));
-    // }
+        let res = default_vm(&kvm, &guest_memory, 1);
+        assert!(matches!(res, Err(Error::NotEnoughMemorySlots)));
+    }
 
-    // #[test]
-    // fn test_failed_irqchip_setup() {
-    //     let kvm = Kvm::new().unwrap();
-    //     let num_vcpus = 1;
-    //     let vm_state = VmConfig::new(&kvm, num_vcpus).unwrap();
-    //     let mut vm = KvmVm {
-    //         vcpus: Vec::new(),
-    //         vcpu_handles: Vec::new(),
-    //         vcpu_barrier: Arc::new(Barrier::new(num_vcpus as usize)),
-    //         config: vm_state,
-    //         fd: Arc::new(kvm.create_vm().unwrap()),
-    //         exit_handler: WrappedExitHandler::default(),
-    //         vcpu_run_state: Arc::new(VcpuRunState::default()),
+    #[test]
+    fn test_failed_irqchip_setup() {
+        let kvm = Kvm::new().unwrap();
+        let num_vcpus = 1;
+        let vm_state = VmConfig::new(&kvm, num_vcpus).unwrap();
+        let mut vm = KvmVm {
+            vcpus: Vec::new(),
+            vcpu_handles: Vec::new(),
+            vcpu_barrier: Arc::new(Barrier::new(num_vcpus as usize)),
+            config: vm_state,
+            fd: Arc::new(kvm.create_vm().unwrap()),
+            exit_handler: WrappedExitHandler::default(),
+            vcpu_run_state: Arc::new(VcpuRunState::default()),
 
-    //         #[cfg(target_arch = "aarch64")]
-    //         gic: None,
-    //     };
+            #[cfg(target_arch = "aarch64")]
+            gic: None,
+        };
 
-    //     // Setting up the irq_controller twice should return an error.
-    //     vm.setup_irq_controller().unwrap();
-    //     let res = vm.setup_irq_controller();
-    //     assert!(matches!(res, Err(Error::SetupInterruptController(_))));
-    // }
+        // Setting up the irq_controller twice should return an error.
+        vm.setup_irq_controller().unwrap();
+        let res = vm.setup_irq_controller();
+        assert!(matches!(res, Err(Error::SetupInterruptController(_))));
+    }
 
-//     #[test]
-//     fn test_shutdown() {
-//         let num_vcpus = 4;
-//         let mut guest_memory = default_memory();
+    #[test]
+    fn test_shutdown() {
+        let num_vcpus = 4;
+        let mut guest_memory = default_memory();
 
-//         let mut vm = create_vm_and_vcpus(num_vcpus, &mut guest_memory);
-//         let asm_code = &[
-//             0xba, 0xf8, 0x03, /* mov $0x3f8, %dx */
-//             0xf4, /* hlt */
-//         ];
-//         guest_memory.write_slice(asm_code, load_addr).unwrap();
-//         vm.run(Some(load_addr)).unwrap();
+        let mut vm = create_vm_and_vcpus(num_vcpus, &mut guest_memory);
+        let load_addr = GuestAddress(0x100_0000);
+        let asm_code = &[
+            0xba, 0xf8, 0x03, /* mov $0x3f8, %dx */
+            0xf4, /* hlt */
+        ];
+        guest_memory.write_slice(asm_code, load_addr).unwrap();
+        vm.run(Some(load_addr)).unwrap();
 
-//         sleep(Duration::new(2, 0));
-//         vm.shutdown();
-//         assert!(vm.exit_handler.0.kicked.load(Ordering::Relaxed));
-//         assert_eq!(vm.vcpus.len(), 0);
-//         assert_eq!(
-//             *vm.vcpu_run_state.vm_state.lock().unwrap(),
-//             VmRunState::Exiting
-//         );
-//     }
+        sleep(Duration::new(2, 0));
+        vm.shutdown();
+        assert!(vm.exit_handler.0.kicked.load(Ordering::Relaxed));
+        assert_eq!(vm.vcpus.len(), 0);
+        assert_eq!(
+            *vm.vcpu_run_state.vm_state.lock().unwrap(),
+            VmRunState::Exiting
+        );
+    }
 
-//     #[cfg(target_arch = "x86_64")]
-//     #[test]
-//     fn test_vm_save_state() {
-//         let num_vcpus = 4;
-//         let mut guest_memory = default_memory();
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_vm_save_state() {
+        let num_vcpus = 4;
+        let mut guest_memory = default_memory();
 
-//         let mut vm = create_vm_and_vcpus(num_vcpus, &mut guest_memory);
-//         let expected_regs = vm
-//             .vcpus
-//             .iter()
-//             .map(|vcpu| vcpu.vcpu_fd.get_regs().unwrap())
-//             .collect::<Vec<kvm_regs>>();
-//         let vm_state = vm.save_state().unwrap();
-//         assert_eq!(
-//             vm_state.pitstate.flags | KVM_PIT_SPEAKER_DUMMY,
-//             KVM_PIT_SPEAKER_DUMMY
-//         );
-//         assert_eq!(vm_state.clock.flags & KVM_CLOCK_TSC_STABLE, 0);
-//         assert_eq!(vm_state.pic_master.chip_id, KVM_IRQCHIP_PIC_MASTER);
-//         assert_eq!(vm_state.pic_slave.chip_id, KVM_IRQCHIP_PIC_SLAVE);
-//         assert_eq!(vm_state.ioapic.chip_id, KVM_IRQCHIP_IOAPIC);
+        let mut vm = create_vm_and_vcpus(num_vcpus, &mut guest_memory);
+        let expected_regs = vm
+            .vcpus
+            .iter()
+            .map(|vcpu| vcpu.vcpu_fd.get_regs().unwrap())
+            .collect::<Vec<kvm_regs>>();
+        let vm_state = vm.save_state().unwrap();
+        assert_eq!(
+            vm_state.pitstate.flags | KVM_PIT_SPEAKER_DUMMY,
+            KVM_PIT_SPEAKER_DUMMY
+        );
+        assert_eq!(vm_state.clock.flags & KVM_CLOCK_TSC_STABLE, 0);
+        assert_eq!(vm_state.pic_master.chip_id, KVM_IRQCHIP_PIC_MASTER);
+        assert_eq!(vm_state.pic_slave.chip_id, KVM_IRQCHIP_PIC_SLAVE);
+        assert_eq!(vm_state.ioapic.chip_id, KVM_IRQCHIP_IOAPIC);
 
-//         // At this point the vcpus have not been running, so the REGS should
-//         // be the default ones.
-//         // Without the vCPUs running there is not much that we can test in
-//         // save/restore.
-//         assert_eq!(
-//             vm_state
-//                 .vcpus_state
-//                 .iter()
-//                 .map(|vcpu_state| vcpu_state.regs)
-//                 .collect::<Vec<kvm_regs>>(),
-//             expected_regs
-//         );
+        // At this point the vcpus have not been running, so the REGS should
+        // be the default ones.
+        // Without the vCPUs running there is not much that we can test in
+        // save/restore.
+        assert_eq!(
+            vm_state
+                .vcpus_state
+                .iter()
+                .map(|vcpu_state| vcpu_state.regs)
+                .collect::<Vec<kvm_regs>>(),
+            expected_regs
+        );
 
-//         // Let's create a new VM from the previously saved state.
-//         let kvm = Kvm::new().unwrap();
-//         let io_manager = Arc::new(Mutex::new(IoManager::new()));
-//         let exit_handler = WrappedExitHandler::default();
-//         assert!(KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager).is_ok());
-//     }
+        // Let's create a new VM from the previously saved state.
+        let kvm = Kvm::new().unwrap();
+        // TODO: Assume that this is stateless for now.
+        let io_manager = Arc::new(Mutex::new(IoManager::new()));
+        let exit_handler = WrappedExitHandler::default();
+        assert!(KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager).is_ok());
+    }
 
-//     #[cfg(target_arch = "aarch64")]
-//     #[test]
-//     fn test_vm_save_state() {
-//         let num_vcpus = 4;
-//         let mut guest_memory = default_memory();
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_vm_save_state() {
+        let num_vcpus = 4;
+        let mut guest_memory = default_memory();
 
-//         let mut vm = create_vm_and_vcpus(num_vcpus, &mut guest_memory);
-//         let vm_state = vm.save_state().unwrap();
+        let mut vm = create_vm_and_vcpus(num_vcpus, &mut guest_memory);
+        let vm_state = vm.save_state().unwrap();
 
-//         // Let's create a new VM from the previously saved state.
-//         let kvm = Kvm::new().unwrap();
-//         let io_manager = Arc::new(Mutex::new(IoManager::new()));
-//         let exit_handler = WrappedExitHandler::default();
-//         KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager).unwrap();
-//     }
-// }
+        // Let's create a new VM from the previously saved state.
+        let kvm = Kvm::new().unwrap();
+        let io_manager = Arc::new(Mutex::new(IoManager::new()));
+        let exit_handler = WrappedExitHandler::default();
+        KvmVm::from_state(&kvm, vm_state, &guest_memory, exit_handler, io_manager).unwrap();
+    }
+ }
