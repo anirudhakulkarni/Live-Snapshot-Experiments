@@ -28,8 +28,10 @@ use vm_vcpu_ref::aarch64::interrupts::{self, Gic, GicConfig, GicState};
 #[cfg(target_arch = "x86_64")]
 use vm_vcpu_ref::x86_64::mptable::{self, MpTable};
 
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 /// Defines the configuration of this VM.
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VmConfig {
     pub num_vcpus: u8,
     pub vcpus_config: VcpuConfigList,
@@ -46,7 +48,7 @@ impl VmConfig {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VmState {
     pub pitstate: kvm_pit_state2,
     pub clock: kvm_clock_data,

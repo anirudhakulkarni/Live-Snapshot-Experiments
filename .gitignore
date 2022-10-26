@@ -3,3 +3,6 @@ vmlinux-*
 bzimage-*
 *.ext4
 __pycache__
+*.zip
+*.txt
+*.lock

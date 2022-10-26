@@ -84,6 +84,11 @@ use regs::*;
 #[cfg(target_arch = "aarch64")]
 use kvm_bindings::{PSR_MODE_EL1h, PSR_A_BIT, PSR_D_BIT, PSR_F_BIT, PSR_I_BIT};
 
+
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
+
+
 /// Errors encountered during vCPU operation.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -213,7 +218,7 @@ pub enum Error {
 /// Dedicated Result type.
 pub type Result<T> = result::Result<T, Error>;
 
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VcpuConfig {
     pub id: u8,
     #[cfg(target_arch = "x86_64")]
@@ -224,7 +229,7 @@ pub struct VcpuConfig {
     pub msrs: Msrs,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VcpuConfigList {
     pub configs: Vec<VcpuConfig>,
 }
@@ -270,7 +275,7 @@ impl VcpuConfigList {
 
 /// Structure holding the kvm state for an x86_64 VCPU.
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct VcpuState {
     pub cpuid: CpuId,
     pub msrs: Msrs,

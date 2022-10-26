@@ -111,6 +111,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc64"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55626594feae15d266d52440b26ff77de0e22230cf0c113abe619084c1ddc910"
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -324,9 +330,10 @@ dependencies = [
 [[package]]
 name = "kvm-bindings"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a78c049190826fff959994b7c1d8a2930d0a348f1b8f3aa4f9bb34cd5d7f2952"
+source = "git+https://github.com/firecracker-microvm/kvm-bindings?tag=v0.5.0-1#4569d3f5b7746b66fc58a14cd05e5dbf9368932b"
 dependencies = [
+ "versionize",
+ "versionize_derive",
  "vmm-sys-util",
 ]
 
@@ -866,6 +873,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 
 [[package]]
+name = "versionize"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7429cf68de8f091b667d27323ed323afd39584a56d533995b12ddd748e5e6ca9"
+dependencies = [
+ "bincode",
+ "crc64",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_derive",
+ "syn",
+ "versionize_derive",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "versionize_derive"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "140aa9fd298f667ea50fa1cb0d8530076924079285c623b18b8f8a1c28386b4a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "virtio-blk"
 version = "0.1.0"
 source = "git+https://github.com/rust-vmm/vm-virtio.git#d8ef45f57b46baa99e80e555deffd3fa1ab9affc"
@@ -943,8 +978,11 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
+ "serde_json",
  "thiserror",
  "utils",
+ "versionize",
+ "versionize_derive",
  "vm-device",
  "vm-memory",
  "vm-vcpu-ref",
@@ -974,7 +1012,10 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "linux-loader",
+ "serde_json",
  "utils",
+ "versionize",
+ "versionize_derive",
  "vm-allocator",
  "vm-device",
  "vm-memory",
