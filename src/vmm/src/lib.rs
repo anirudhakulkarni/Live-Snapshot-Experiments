@@ -83,6 +83,7 @@ use serde_json;
 use vm_vcpu::vm::VmState;
 use vm_memory::FileOffset;
 use std::io::Read;
+use vm::{VmRunState};
 
 mod boot;
 mod config;
@@ -406,12 +407,64 @@ impl Vmm {
 
     pub fn save_snapshot(&self, cpu_snapshot_path: String, memory_snapshot_path: String,  resume: bool){
         if resume{
-            self.vm.snapshot_and_resume(cpu_snapshot_path, memory_snapshot_path);   
+            self.snapshot_and_resume(&cpu_snapshot_path[..]);   
         }
         else {
-            self.vm.snapshot_and_pause(cpu_snapshot_path, memory_snapshot_path);
+            self.snapshot_and_pause(&cpu_snapshot_path[..]);
         }
     }
+    pub fn snapshot_and_resume(&mut self, snapshot_path: &str) {
+        // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+        self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+        for handle in self.vm.vcpu_handles.iter(){
+            let _ = handle.kill(SIGRTMIN() + 0);
+        }
+
+        for i in 0..self.vm.config.num_vcpus {
+            let r = self.vm.vcpu_rx.as_ref().unwrap();
+            r.recv().unwrap();
+            println!("Received message from {i}th cpu");
+        }
+    
+        // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
+        // let vcpu_state = self.vm.save_state().unwrap();
+
+        // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+
+        // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
+        self.save_snapshot_helper(&snapshot_path[..]).unwrap();
+        // FIXME: issue here is to get mutable reference to self.
+        
+        // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
+        self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
+    }
+
+    pub fn snapshot_and_pause(&mut self, snapshot_path: &str) {
+        // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+        // self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+        // for handle in self.vm.vcpu_handles.iter(){
+        //     let _ = handle.kill(SIGRTMIN() + 0);
+        // }
+
+        // for i in 0..self.vm.config.num_vcpus {
+        //     let r = self.vm.vcpu_rx.as_ref().unwrap();
+        //     r.recv().unwrap();
+        //     println!("Received message from {i}th cpu");
+        // }
+    
+        // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
+        // let vcpu_state = self.vm.save_state().unwrap();
+
+        // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+
+        // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
+        // self.save_snapshot_helper(&snapshot_path[..]).unwrap();
+        // FIXME: issue here is to get mutable reference to self.
+        
+        // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
+        // self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
+    }
+
     pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
 
         // TODO: map error

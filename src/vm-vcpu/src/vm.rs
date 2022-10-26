@@ -77,16 +77,16 @@ pub struct VmState {
 /// this type will become on of the concrete implementations.
 pub struct KvmVm<EH: ExitHandler + Send> {
     fd: Arc<VmFd>,
-    config: VmConfig,
+    pub config: VmConfig,
     // Only one of `vcpus` or `vcpu_handles` can be active at a time.
     // To create the `vcpu_handles` the `vcpu` vector is drained.
     // A better abstraction should be used to represent this behavior.
     vcpus: Vec<KvmVcpu>,
-    vcpu_handles: Vec<JoinHandle<()>>,
+    pub vcpu_handles: Vec<JoinHandle<()>>,
     exit_handler: EH,
     vcpu_barrier: Arc<Barrier>,
-    vcpu_run_state: Arc<VcpuRunState>,
-    vcpu_rx: Option<Receiver<i32>>,
+    pub vcpu_run_state: Arc<VcpuRunState>,
+    pub vcpu_rx: Option<Receiver<i32>>,
 
     #[cfg(target_arch = "aarch64")]
     gic: Option<Gic>,
@@ -498,7 +498,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
 
         // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
-        self.save_snapshot_helper(&cpu_snapshot_path[..]).unwrap();
+        // self.save_snapshot_helper(&cpu_snapshot_path[..]).unwrap();
         // FIXME: issue here is to get mutable reference to self.
         
         // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
