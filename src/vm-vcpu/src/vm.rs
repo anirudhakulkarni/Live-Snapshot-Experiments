@@ -30,6 +30,10 @@ use vm_vcpu_ref::x86_64::mptable::{self, MpTable};
 
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
+use std::fs::File;
+use std::mem;
+
+
 /// Defines the configuration of this VM.
 #[derive(Clone, Versionize)]
 pub struct VmConfig {
@@ -448,6 +452,30 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
 
         Ok(())
     }
+    pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
+
+        // TODO: map error
+        let mut snapshot_file = File::create(snapshot_path).unwrap();
+        // snapshot_file.read_to_end(buf)d
+        let vm_state = self.save_state().unwrap();
+        let state_size = mem::size_of::<VmState>();
+
+        let mut mem = vec![0; state_size];
+        let mut version_map = VersionMap::new();
+        version_map
+            .new_version() 
+            .set_type_version(VmState::type_id(), 1) 
+            .new_version() 
+            .set_type_version(VmState::type_id(), 1); 
+
+        vm_state
+            .serialize(&mut mem.as_mut_slice(), &version_map, 1)
+            .unwrap();
+
+        // save vm state and memory state to snapshot file
+        serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
+        Ok(())
+    }
 
 
     // FIXME: Take input parameter as file where it needs to be saved
@@ -469,6 +497,9 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
 
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
 
+        // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
+        self.save_snapshot_helper(&cpu_snapshot_path[..]).unwrap();
+        // FIXME: issue here is to get mutable reference to self.
         
         // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
         self.vcpu_run_state.set_and_notify(VmRunState::Running);
@@ -497,6 +528,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         // let vcpu_state = self.vm.save_state().unwrap();
 
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+        // self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
 
         // Now, make the vmm exit out of run loop
         let _ = self.exit_handler.kick();
