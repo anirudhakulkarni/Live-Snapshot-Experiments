@@ -81,9 +81,9 @@ pub struct KvmVm<EH: ExitHandler + Send> {
     // Only one of `vcpus` or `vcpu_handles` can be active at a time.
     // To create the `vcpu_handles` the `vcpu` vector is drained.
     // A better abstraction should be used to represent this behavior.
-    vcpus: Vec<KvmVcpu>,
+    pub vcpus: Vec<Arc<Mutex<KvmVcpu>>>,
     pub vcpu_handles: Vec<JoinHandle<()>>,
-    exit_handler: EH,
+    pub exit_handler: EH,
     vcpu_barrier: Arc<Barrier>,
     pub vcpu_run_state: Arc<VcpuRunState>,
     pub vcpu_rx: Option<Receiver<i32>>,
@@ -369,7 +369,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     #[cfg(target_arch = "x86_64")]
     fn setup_irq_controller(&mut self) -> Result<()> {
         // First, create the irqchip.
-        // On `x86_64`, this _must_ be created _before_ the vCPUs.
+        // On `x86_64`, this must be created before the vCPUs.
         // It sets up the virtual IOAPIC, virtual PIC, and sets up the future vCPUs for local APIC.
         // When in doubt, look in the kernel for `KVM_CREATE_IRQCHIP`.
         // https://elixir.bootlin.com/linux/latest/source/arch/x86/kvm/x86.c
@@ -417,23 +417,22 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<i32>();
         self.vcpu_rx = Some(rx);
-        self.vcpus = vcpus_config
-            .configs
-            .iter()
-            .map(|config| {
-                let tx = tx.clone();
-                KvmVcpu::new(
-                    &self.fd,
-                    bus.clone(),
-                    config.clone(),
-                    self.vcpu_barrier.clone(),
-                    self.vcpu_run_state.clone(),
-                    memory,
-                    tx
-                )
-            })
-            .collect::<vcpu::Result<Vec<KvmVcpu>>>()
-            .map_err(Error::CreateVcpu)?;
+        let mut vcpus = Vec::new();
+        for i in 0..vcpus_config.configs.len(){
+            let tx = tx.clone();
+            let kvmvcpu = KvmVcpu::new(
+                &self.fd,
+                bus.clone(),
+                vcpus_config.configs[i].clone(),
+                self.vcpu_barrier.clone(),
+                self.vcpu_run_state.clone(),
+                memory,
+                tx
+            ).map_err(Error::CreateVcpu)?;
+            vcpus.push(Arc::new(Mutex::new(kvmvcpu)));
+        }
+
+        self.vcpus = vcpus;
         #[cfg(target_arch = "aarch64")]
         self.setup_irq_controller()?;
 
@@ -447,48 +446,47 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     ) -> Result<()> {
         let (tx, rx) = mpsc::channel::<i32>();
         self.vcpu_rx = Some(rx);
-        self.vcpus = vcpus_state
-            .iter()
-            .map(|state| {
-                let tx = tx.clone();
-                KvmVcpu::from_state::<M>(
-                    &self.fd,
-                    bus.clone(),
-                    state.clone(),
-                    self.vcpu_barrier.clone(),
-                    self.vcpu_run_state.clone(),
-                    tx
-                )
-            })
-            .collect::<vcpu::Result<Vec<KvmVcpu>>>()
-            .map_err(Error::CreateVcpu)?;
+        let mut vcpus = Vec::new();
+        for i in 0..vcpus_state.len() {
+            let tx = tx.clone();
+            let kvmvcpu = KvmVcpu::from_state::<M>(
+                &self.fd,
+                bus.clone(),
+                vcpus_state[i].clone(),
+                self.vcpu_barrier.clone(),
+                self.vcpu_run_state.clone(),
+                tx
+            ).map_err(Error::CreateVcpu)?;
+            vcpus.push(Arc::new(Mutex::new(kvmvcpu)));
+        }
+        self.vcpus = vcpus;
 
         Ok(())
     }
-    pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
+    // pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
 
-        // TODO: map error
-        let mut snapshot_file = File::create(snapshot_path).unwrap();
-        // snapshot_file.read_to_end(buf)d
-        let vm_state = self.save_state().unwrap();
-        let state_size = mem::size_of::<VmState>();
+    //     // TODO: map error
+    //     let mut snapshot_file = File::create(snapshot_path).unwrap();
+    //     // snapshot_file.read_to_end(buf)d
+    //     let vm_state = self.save_state().unwrap();
+    //     let state_size = mem::size_of::<VmState>();
 
-        let mut mem = vec![0; state_size];
-        let mut version_map = VersionMap::new();
-        version_map
-            .new_version() 
-            .set_type_version(VmState::type_id(), 1) 
-            .new_version() 
-            .set_type_version(VmState::type_id(), 1); 
+    //     let mut mem = vec![0; state_size];
+    //     let mut version_map = VersionMap::new();
+    //     version_map
+    //         .new_version() 
+    //         .set_type_version(VmState::type_id(), 1) 
+    //         .new_version() 
+    //         .set_type_version(VmState::type_id(), 1); 
 
-        vm_state
-            .serialize(&mut mem.as_mut_slice(), &version_map, 1)
-            .unwrap();
+    //     vm_state
+    //         .serialize(&mut mem.as_mut_slice(), &version_map, 1)
+    //         .unwrap();
 
-        // save vm state and memory state to snapshot file
-        serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
-        Ok(())
-    }
+    //     // save vm state and memory state to snapshot file
+    //     serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
+    //     Ok(())
+    // }
 
 
     // // FIXME: Take input parameter as file where it needs to be saved
@@ -571,16 +569,19 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
 
         KvmVcpu::setup_signal_handler().unwrap();
 
-        for (id, mut vcpu) in self.vcpus.drain(..).enumerate() {
+        println!("vcpus: {:?}",self.vcpus.len());
+        for (id, mut vcpu) in self.vcpus.iter().enumerate() {
             let vcpu_exit_handler = self.exit_handler.clone();
+            let vcpu_clone  = vcpu.clone();
             let vcpu_handle = thread::Builder::new()
                 .name(format!("vcpu_{}", id))
                 .spawn(move || {
                     // TODO: Check the result of both vcpu run & kick.
-                    let _ = vcpu.run(vcpu_run_addr).unwrap();
+                    
+                    let _ = vcpu_clone.lock().unwrap().run(vcpu_run_addr).unwrap();
                     println!("Vcpu:{} exiting", id);
                     let _ = vcpu_exit_handler.kick();
-                    vcpu.run_state.set_and_notify(VmRunState::Exiting);
+                    vcpu_clone.lock().unwrap().run_state.set_and_notify(VmRunState::Exiting);
                 })
                 .map_err(Error::RunVcpus)?;
             self.vcpu_handles.push(vcpu_handle);
@@ -592,25 +593,33 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     pub fn resume(&mut self) -> Result<()> {
         if self.vcpus.len() != self.config.num_vcpus as usize {
             return Err(Error::RunVcpus(io::Error::from(ErrorKind::InvalidInput)));
-        }
+        }   
 
+        println!("inside vm resume");
         KvmVcpu::setup_signal_handler().unwrap();
 
-        for (id, mut vcpu) in self.vcpus.drain(..).enumerate() {
+        println!("starting loop");
+        println!("vcpus: {:?}",self.vcpus.len());
+        for (id, mut vcpu) in self.vcpus.iter().enumerate() {
+            println!("[{}]: inside loop", id);
             let vcpu_exit_handler = self.exit_handler.clone();
+            let vcpu_clone = vcpu.clone();
+            println!("[{}]: got eh", id);
             let vcpu_handle = thread::Builder::new()
                 .name(format!("vcpu_{}", id))
                 .spawn(move || {
                     // TODO: Check the result of both vcpu run & kick.
-                    println!("starting vcpu:{} from rip {}", id, vcpu.vcpu_fd.get_regs().unwrap().rip);
-                    let _ = vcpu.run(Some(GuestAddress(vcpu.vcpu_fd.get_regs().unwrap().rip as u64))).unwrap();
+                    println!("starting vcpu:{} from rip {}", id, vcpu_clone.lock().unwrap().vcpu_fd.get_regs().unwrap().rip);
+                    let _ = vcpu_clone.lock().unwrap().run(Some(GuestAddress(vcpu_clone.lock().unwrap().vcpu_fd.get_regs().unwrap().rip as u64))).unwrap();
                     println!("Vcpu:{} exiting", id);
                     let _ = vcpu_exit_handler.kick();
-                    vcpu.run_state.set_and_notify(VmRunState::Exiting);
+                    vcpu_clone.lock().unwrap().run_state.set_and_notify(VmRunState::Exiting);
                 })
                 .map_err(Error::RunVcpus)?;
             self.vcpu_handles.push(vcpu_handle);
         }
+
+        println!("out of vm resume");
 
         Ok(())
     }
@@ -656,6 +665,8 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     /// Returns an error when the VM is not paused.
     #[cfg(target_arch = "x86_64")]
     pub fn save_state(&mut self) -> Result<VmState> {
+
+        println!("inside save_state");
         let pitstate = self.fd.get_pit2().map_err(Error::VmGetPit2)?;
 
         let mut clock = self.fd.get_clock().map_err(Error::VmGetClock)?;
@@ -686,13 +697,15 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             .get_irqchip(&mut ioapic)
             .map_err(Error::VmGetIrqChip)?;
 
+        println!("here deadlock can occur");
         let vcpus_state = self
             .vcpus
             .iter_mut()
-            .map(|vcpu| vcpu.save_state())
+            .map(|vcpu| vcpu.lock().unwrap().save_state())
             .collect::<vcpu::Result<Vec<VcpuState>>>()
             .map_err(Error::SaveVcpuState)?;
 
+        println!("no deadlovk");
         Ok(VmState {
             pitstate,
             clock,

@@ -3,6 +3,7 @@
 //! Reference VMM built with rust-vmm components and minimal glue.
 #[allow(missing_docs)]
 
+
 use std::convert::TryFrom;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
@@ -85,7 +86,7 @@ use vm_vcpu::vm::VmState;
 use vm_memory::FileOffset;
 use std::io::Read;
 use vm::{VmRunState};
-use std::io::Write;
+// use std::io::Write;
 
 mod boot;
 mod config;
@@ -500,6 +501,7 @@ pub fn write(content: &str) {
         .open("print")
         .unwrap();
     // append content to file
+    println!("{:?}",content);
     writeln!(file, "{}", content).unwrap();
     // // write to file
     // std::fs::write("print", content).expect("Unable to write data");
@@ -543,37 +545,47 @@ impl Vmm {
         // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
         self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
         // FIXME: issue here is to get mutable reference to self.
-        
+        println!("Setting and notifying");
         // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
         self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
     }
 
     pub fn snapshot_and_pause(&mut self, snapshot_path: &str, memory_snapshot_path: &str) {
         // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
-        self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+        self.vm.vcpu_run_state.set_and_notify(VmRunState::Exiting);
         for handle in self.vm.vcpu_handles.iter(){
             let _ = handle.kill(SIGRTMIN() + 0);
         }
 
         for i in 0..self.vm.config.num_vcpus {
             let r = self.vm.vcpu_rx.as_ref().unwrap();
-            r.recv().unwrap();
+            match r.recv() {
+                Ok(_) => {
+                },
+                Err(e) => {
+                    println!("Error:{:?}", e);
+                }
+            }
             println!("Received message from {i}th cpu");
+        }
+
+        for i in 0..self.vm.config.num_vcpus {
+            // #[feature(mutex_unlock)]
+            // Mutex::unlock(self.vm.vcpus[i]); 
+            println!("Dropping locks");
+            std::mem::drop(self.vm.vcpus[i as usize]);  
+            println!("Dropped locks");
         }
     
         // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
         // let vcpu_state = self.vm.save_state().unwrap();
+        self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
 
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
-        self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
 
-        self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
-        // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
-        // self.save_snapshot_helper(&snapshot_path[..]).unwrap();
-        // FIXME: issue here is to get mutable reference to self.
+        // Now, make the vmm exit out of run loop
+        let _ = self.vm.exit_handler.kick();
         
-        // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
-        self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
     }
 
     pub fn save_cpu(&mut self, snapshot_path: &str) {
@@ -583,7 +595,8 @@ impl Vmm {
 
         let mut snapshot_file = File::create(snapshot_path).unwrap();
         let vm_state = self.vm.save_state().unwrap();
-
+        println!("vcpus len before saving: {:?}",self.vm.vcpus.len());
+        println!("vcpustate len before saving : {:?}", vm_state.vcpus_state.len());
 
         // let bytes = unsafe { std::mem::transmute::<VmState, [u8; std::mem::size_of::<VmState>()]>(vm_state) };
         // snapshot_file.write_all(&bytes).unwrap();
@@ -607,8 +620,9 @@ impl Vmm {
     
 
     pub fn save_snapshot_helper(&mut self, snapshot_path: &str, memory_snapshot_path: &str) -> Result<()> {
-
+        println!("calling from save_snapshot_helper");
         self.save_cpu(snapshot_path);
+        println!("outside save cpu");
         // snapshot_file.read_to_end(buf)d
         std::fs::copy("memory.txt", memory_snapshot_path).unwrap();
         // save vm state and memory state to snapshot file
@@ -638,7 +652,7 @@ impl Vmm {
         }
 
         else {
-
+            
             println!("calling vm resume");
             self.vm.resume().unwrap(); 
         }
@@ -667,7 +681,7 @@ impl Vmm {
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 }
                 _ => {
-                    write("i am eating 5 star.....koi kaam naho hoga");
+                    // write("i am eating 5 star.....koi kaam naho hoga");
                     // do nothing, eat 5 star.
                 }
             }
