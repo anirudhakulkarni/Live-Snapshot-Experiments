@@ -405,7 +405,7 @@ impl TryFrom<VMMConfig> for Vmm {
 
 impl Vmm {
 
-    pub fn save_snapshot(&self, cpu_snapshot_path: String, memory_snapshot_path: String,  resume: bool){
+    pub fn save_snapshot(&mut self, cpu_snapshot_path: String, memory_snapshot_path: String,  resume: bool){
         if resume{
             self.snapshot_and_resume(&cpu_snapshot_path[..]);   
         }
@@ -557,7 +557,8 @@ impl Vmm {
                 Err(e) => eprintln!("Failed to handle events: {:?}", e),
             }
             // NOTE: checking if need to snapshot or not
-            let rpc_controller = self.rpc_controller.lock().unwrap();
+            let rpc = self.rpc_controller.clone();
+            let rpc_controller =rpc.lock().unwrap();
             let cpu_snapshot_path = rpc_controller.cpu_snapshot_path.clone();
             let memory_snapshot_path = rpc_controller.memory_snapshot_path.clone();
             match rpc_controller.which_event() {
