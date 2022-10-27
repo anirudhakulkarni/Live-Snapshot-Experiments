@@ -352,6 +352,26 @@ impl TryFrom<VMMConfig> for Vmm {
         let vm_config = VmConfig::new(&kvm, config.vcpu_config.num)?;
 
         let wrapped_exit_handler = WrappedExitHandler::new()?;
+        
+        // create vm if rpc config does not exist
+        let vm = if config.rpc_config.is_none() {
+            KvmVm::new(
+            &kvm,
+            vm_config.clone(),
+            &guest_memory,
+            wrapped_exit_handler.clone(),
+            device_mgr.clone(),
+            )?;
+        } else {
+            //TODO: create vm from snapshot
+            KvmVm::new(
+                &kvm,
+                vm_config.clone(),
+                &guest_memory,
+                wrapped_exit_handler.clone(),
+                device_mgr.clone(),
+                )?;
+        };
         let vm = KvmVm::new(
             &kvm,
             vm_config,
@@ -561,12 +581,15 @@ impl Vmm {
             let rpc_controller =rpc.lock().unwrap();
             let cpu_snapshot_path = rpc_controller.cpu_snapshot_path.clone();
             let memory_snapshot_path = rpc_controller.memory_snapshot_path.clone();
+            // println!("PAUSE OR RESUME: {:?}", rpc_controller.which_event());
             match rpc_controller.which_event() {
                 "PAUSE" => {
+                    println!("PAUSE");
                     self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, false);
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 },
                 "RESUME" => {
+                    println!("RESUME");
                     self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, true);
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 }
