@@ -6,12 +6,13 @@
 use libc::siginfo_t;
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::fs::OpenOptions;
 use std::io::{self, stdin};
-use std::{thread, time};
+use std::{thread, time, mem};
 use std::os::raw::c_int;
 use std::result;
 use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
-
+use std::io::Write;
 #[cfg(target_arch = "x86_64")]
 use kvm_bindings::{
     kvm_debugregs, kvm_fpu, kvm_lapic_state, kvm_mp_state, kvm_regs, kvm_sregs, kvm_vcpu_events,
@@ -839,9 +840,27 @@ impl KvmVcpu {
                             // and enter the kvm run loop.
                             break;
                         }
+                        // The VM is suspending. It will send the message to VM to let it know I'm suspended and then I will sleep on condvar
                         VmRunState::Suspending => {
-                            // The VM is suspending. It will send the message to VM to let it know I'm suspended and then I will sleep on condvar
+                            // create file if not exists
+                            let mut file = OpenOptions::new()
+                                .write(true)
+                                .create(true)
+                                .open("suspend.txt")
+                                .unwrap();
+                            let state_size= mem::size_of::<VcpuState>();
+                            // write vcpu state to file
+                            let mut mem = vec![0; state_size];
+                            let vcpu_state = self.save_state().unwrap();
+                            let mut version_map = VersionMap::new();
+                            vcpu_state
+                            .serialize(&mut mem, &version_map, 1)
+                            .unwrap();
+                            file.write_all(&mem).unwrap();
+                    
+
                             self.tx.send(self.config.id.into()).unwrap();
+
                         }
                         VmRunState::Exiting => {
                             self.tx.send(self.config.id.into()).unwrap();
@@ -866,7 +885,8 @@ impl KvmVcpu {
     }
 
     #[cfg(target_arch = "x86_64")]
-    pub fn save_state(&mut self) -> Result<VcpuState> {
+    pub fn save_state(& self) -> Result<VcpuState> {
+        // THIS WAS CHANGED FROM MUT TO NON MUT AT 3 AM in morning. Be careful
         let mp_state = self.vcpu_fd.get_mp_state().map_err(Error::VcpuGetMpState)?;
         let regs = self.vcpu_fd.get_regs().map_err(Error::VcpuGetRegs)?;
         let sregs = self.vcpu_fd.get_sregs().map_err(Error::VcpuGetSregs)?;

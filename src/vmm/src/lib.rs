@@ -551,6 +551,7 @@ impl Vmm {
     }
 
     pub fn snapshot_and_pause(&mut self, snapshot_path: &str, memory_snapshot_path: &str) {
+        
         // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
         self.vm.vcpu_run_state.set_and_notify(VmRunState::Exiting);
         for handle in self.vm.vcpu_handles.iter(){
@@ -569,13 +570,13 @@ impl Vmm {
             println!("Received message from {i}th cpu");
         }
 
-        for i in 0..self.vm.config.num_vcpus {
-            // #[feature(mutex_unlock)]
-            // Mutex::unlock(self.vm.vcpus[i]); 
-            println!("Dropping locks");
-            std::mem::drop(self.vm.vcpus[i as usize]);  
-            println!("Dropped locks");
-        }
+        // for i in 0..self.vm.config.num_vcpus {
+        //     // #[feature(mutex_unlock)]
+        //     // Mutex::unlock(self.vm.vcpus[i]); 
+        //     println!("Dropping locks");
+        //     // std::mem::drop(self.vm.vcpus[i as usize]);  
+        //     println!("Dropped locks");
+        // }
     
         // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
         // let vcpu_state = self.vm.save_state().unwrap();

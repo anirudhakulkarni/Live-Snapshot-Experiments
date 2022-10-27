@@ -665,6 +665,8 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     /// Returns an error when the VM is not paused.
     #[cfg(target_arch = "x86_64")]
     pub fn save_state(&mut self) -> Result<VmState> {
+        use std::io::Read;
+
 
         println!("inside save_state");
         let pitstate = self.fd.get_pit2().map_err(Error::VmGetPit2)?;
@@ -698,12 +700,24 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             .map_err(Error::VmGetIrqChip)?;
 
         println!("here deadlock can occur");
-        let vcpus_state = self
-            .vcpus
-            .iter_mut()
-            .map(|vcpu| vcpu.lock().unwrap().save_state())
-            .collect::<vcpu::Result<Vec<VcpuState>>>()
-            .map_err(Error::SaveVcpuState)?;
+        // read vcpu state from suspend.txt using versionizable
+        // TODO: Sachin look here    
+        let mut file = File::open("suspend.txt").unwrap();
+        // let mut vcpu_state:VcpuState = serde_json::from_str(&fs::read_to_string("suspend.txt").unwrap()).unwrap();
+        let mut version_map = VersionMap::new();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        // println!("vec: {:?}", bytes);
+        let mut vcpus_state=Vec::new();
+        vcpus_state.push(VcpuState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap());
+    
+        
+        // let vcpus_state = self
+        //     .vcpus
+        //     .iter_mut()
+        //     .map(|vcpu| vcpu.lock().unwrap().save_state())
+        //     .collect::<vcpu::Result<Vec<VcpuState>>>()
+        //     .map_err(Error::SaveVcpuState)?;
 
         println!("no deadlovk");
         Ok(VmState {
