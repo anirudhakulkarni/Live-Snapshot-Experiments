@@ -21,7 +21,7 @@ use vmm::RpcController;
 #[tarpc::service]
 pub trait World {
     async fn snapshot_and_resume(cpu_snapshotpath: String, memory_snapshot_path: String, port: u16) -> String;
-    async fn snapshot_and_pause(cpu_snapshot_path: String, memory_snapshot_path: String, port: u16) -> String;
+    async fn snapshot_and_pause(cpu_snapshot_path: String, memory_snapshot_path: String, port: u16, resume: bool) -> String;
 }
 
 #[derive(Clone)]
@@ -31,12 +31,18 @@ struct RPCServer{
 
 #[tarpc::server]
 impl World for RPCServer {
-    async fn snapshot_and_pause(self, _: context::Context, cpu_snapshot_path: String, memory_snapshot_path: String, port: u16) -> String {
+    async fn snapshot_and_pause(self, _: context::Context, cpu_snapshot_path: String, memory_snapshot_path: String, port: u16, resume: bool) -> String {
         println!("RPC Call: Snapshot and Pause");
         let mut rpc_controller = self.rpc_controller.lock().unwrap();
         rpc_controller.cpu_snapshot_path = cpu_snapshot_path;
         rpc_controller.memory_snapshot_path = memory_snapshot_path;
-        rpc_controller.pause_or_resume.store(1, Ordering::Relaxed);
+        if resume{
+            rpc_controller.pause_or_resume.store(2, Ordering::Relaxed);
+        }
+        else{
+            rpc_controller.pause_or_resume.store(1, Ordering::Relaxed);
+        }
+
         rpc_controller.event_fd.write(1).unwrap();
         "Success".to_string()
     }
@@ -96,6 +102,7 @@ async fn main() {
                     .await;
                     println!("Exiting RPC Listener");
             });
+            println!("just before vm.run");
             vmm.run().unwrap();
             println!("Exited VMM");
         }

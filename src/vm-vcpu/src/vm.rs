@@ -491,61 +491,61 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
     }
 
 
-    // FIXME: Take input parameter as file where it needs to be saved
-    pub fn snapshot_and_resume(&self, cpu_snapshot_path: String, memory_snapshot_path: String) {
-        // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
-        self.vcpu_run_state.set_and_notify(VmRunState::Suspending);
-        for handle in self.vcpu_handles.iter(){
-            let _ = handle.kill(SIGRTMIN() + 0);
-        }
+    // // FIXME: Take input parameter as file where it needs to be saved
+    // pub fn snapshot_and_resume(&self, cpu_snapshot_path: String, memory_snapshot_path: String) {
+    //     // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+    //     self.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+    //     for handle in self.vcpu_handles.iter(){
+    //         let _ = handle.kill(SIGRTMIN() + 0);
+    //     }
 
-        for i in 0..self.config.num_vcpus {
-            let r = self.vcpu_rx.as_ref().unwrap();
-            r.recv().unwrap();
-            println!("Received message from {i}th cpu");
-        }
+    //     for i in 0..self.config.num_vcpus {
+    //         let r = self.vcpu_rx.as_ref().unwrap();
+    //         r.recv().unwrap();
+    //         println!("Received message from {i}th cpu");
+    //     }
     
-        // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
-        // let vcpu_state = self.vm.save_state().unwrap();
+    //     // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
+    //     // let vcpu_state = self.vm.save_state().unwrap();
 
-        // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+    //     // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
 
-        // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
-        // self.save_snapshot_helper(&cpu_snapshot_path[..]).unwrap();
-        // FIXME: issue here is to get mutable reference to self.
+    //     // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
+    //     // self.save_snapshot_helper(&cpu_snapshot_path[..]).unwrap();
+    //     // FIXME: issue here is to get mutable reference to self.
         
-        // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
-        self.vcpu_run_state.set_and_notify(VmRunState::Running);
-    }
+    //     // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
+    //     self.vcpu_run_state.set_and_notify(VmRunState::Running);
+    // }
 
-    pub fn snapshot_and_pause(&self, cpu_snapshot_path: String, memory_snapshot_path: String) {
-        // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
-        self.vcpu_run_state.set_and_notify(VmRunState::Exiting);
-        for handle in self.vcpu_handles.iter(){
-            let _ = handle.kill(SIGRTMIN() + 0);
-        }
+    // pub fn snapshot_and_pause(&self, cpu_snapshot_path: String, memory_snapshot_path: String) {
+    //     // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+    //     self.vcpu_run_state.set_and_notify(VmRunState::Exiting);
+    //     for handle in self.vcpu_handles.iter(){
+    //         let _ = handle.kill(SIGRTMIN() + 0);
+    //     }
 
-        for i in 0..self.config.num_vcpus {
-            let r = self.vcpu_rx.as_ref().unwrap();
-            match r.recv() {
-                Ok(_) => {
-                },
-                Err(e) => {
-                    println!("Error:{:?}", e);
-                }
-            }
-            println!("Received message from {i}th cpu");
-        }
+    //     for i in 0..self.config.num_vcpus {
+    //         let r = self.vcpu_rx.as_ref().unwrap();
+    //         match r.recv() {
+    //             Ok(_) => {
+    //             },
+    //             Err(e) => {
+    //                 println!("Error:{:?}", e);
+    //             }
+    //         }
+    //         println!("Received message from {i}th cpu");
+    //     }
     
-        // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
-        // let vcpu_state = self.vm.save_state().unwrap();
+    //     // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
+    //     // let vcpu_state = self.vm.save_state().unwrap();
 
-        // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
-        // self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
+    //     // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+    //     // self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
 
-        // Now, make the vmm exit out of run loop
-        let _ = self.exit_handler.kick();
-    }
+    //     // Now, make the vmm exit out of run loop
+    //     let _ = self.exit_handler.kick();
+    // }
 
     /// Let KVM know that instead of triggering an actual interrupt for `irq_number`, we will
     /// just write on the specified `event`.

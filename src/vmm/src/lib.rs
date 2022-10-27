@@ -6,7 +6,7 @@
 use std::convert::TryFrom;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::{thread, time};
 use std::io::{self, stdin, stdout};
 use std::ops::DerefMut;
@@ -85,6 +85,7 @@ use vm_vcpu::vm::VmState;
 use vm_memory::FileOffset;
 use std::io::Read;
 use vm::{VmRunState};
+use std::io::Write;
 
 mod boot;
 mod config;
@@ -490,18 +491,39 @@ impl TryFrom<VMMConfig> for Vmm {
     }
 }
 
+pub fn write(content: &str) {
+    // create file with name "print" if it doesn't exist
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open("print")
+        .unwrap();
+    // append content to file
+    writeln!(file, "{}", content).unwrap();
+    // // write to file
+    // std::fs::write("print", content).expect("Unable to write data");
+}
+
 impl Vmm {
 
     pub fn save_snapshot(&mut self, cpu_snapshot_path: String, memory_snapshot_path: String,  resume: bool){
+        write("SAVE SNAPSHOT function called with resume = ");
+        write(&resume.to_string());
         if resume{
+            write("resume true received in VMM");
             self.snapshot_and_resume(&cpu_snapshot_path[..], &memory_snapshot_path[..]);   
         }
         else {
+            write("resume false received in VMM");
             self.snapshot_and_pause(&cpu_snapshot_path[..], &memory_snapshot_path[..]);
         }
     }
     pub fn snapshot_and_resume(&mut self, snapshot_path: &str, memory_snapshot_path: &str) {
         // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+
+        write("Inside snapshot_and_resume");
+        println!("Inside snapshot_and_resume");
         self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
         for handle in self.vm.vcpu_handles.iter(){
             let _ = handle.kill(SIGRTMIN() + 0);
@@ -543,6 +565,7 @@ impl Vmm {
         // let vcpu_state = self.vm.save_state().unwrap();
 
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+        self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
 
         self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
         // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
@@ -550,11 +573,12 @@ impl Vmm {
         // FIXME: issue here is to get mutable reference to self.
         
         // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
-        // self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
+        self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
     }
 
     pub fn save_cpu(&mut self, snapshot_path: &str) {
 
+        write("Inside save_snapshot_helper");
         // TODO: map error
 
         let mut snapshot_file = File::create(snapshot_path).unwrap();
@@ -625,20 +649,25 @@ impl Vmm {
                 Err(e) => eprintln!("Failed to handle events: {:?}", e),
             }
             // NOTE: checking if need to snapshot or not
+
             let rpc = self.rpc_controller.clone();
             let rpc_controller =rpc.lock().unwrap();
             let cpu_snapshot_path = rpc_controller.cpu_snapshot_path.clone();
             let memory_snapshot_path = rpc_controller.memory_snapshot_path.clone();
+            // println!("PAUSE OR RESUME: {:?}", rpc_controller.which_event());
             match rpc_controller.which_event() {
                 "PAUSE" => {
+                    println!("PAUSE");
                     self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, false);
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 },
                 "RESUME" => {
+                    println!("RESUME");
                     self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, true);
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 }
                 _ => {
+                    write("i am eating 5 star.....koi kaam naho hoga");
                     // do nothing, eat 5 star.
                 }
             }
