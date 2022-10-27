@@ -6,7 +6,7 @@
 use std::convert::TryFrom;
 #[cfg(target_arch = "aarch64")]
 use std::convert::TryInto;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::{thread, time};
 use std::io::{self, stdin, stdout};
 use std::ops::DerefMut;
@@ -84,6 +84,7 @@ use vm_vcpu::vm::VmState;
 use vm_memory::FileOffset;
 use std::io::Read;
 use vm::{VmRunState};
+use std::io::Write;
 
 mod boot;
 mod config;
@@ -403,18 +404,39 @@ impl TryFrom<VMMConfig> for Vmm {
     }
 }
 
+pub fn write(content: &str) {
+    // create file with name "print" if it doesn't exist
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open("print")
+        .unwrap();
+    // append content to file
+    writeln!(file, "{}", content).unwrap();
+    // // write to file
+    // std::fs::write("print", content).expect("Unable to write data");
+}
+
 impl Vmm {
 
     pub fn save_snapshot(&mut self, cpu_snapshot_path: String, memory_snapshot_path: String,  resume: bool){
+        write("SAVE SNAPSHOT function called with resume = ");
+        write(&resume.to_string());
         if resume{
-            self.snapshot_and_resume(&cpu_snapshot_path[..]);   
+            write("resume true received in VMM");
+            self.snapshot_and_resume(&cpu_snapshot_path[..], &memory_snapshot_path[..]);   
         }
         else {
-            self.snapshot_and_pause(&cpu_snapshot_path[..]);
+            write("resume false received in VMM");
+            self.snapshot_and_pause(&cpu_snapshot_path[..], &memory_snapshot_path[..]);
         }
     }
-    pub fn snapshot_and_resume(&mut self, snapshot_path: &str) {
+    pub fn snapshot_and_resume(&mut self, snapshot_path: &str, memory_snapshot_path: &str) {
         // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
+
+        write("Inside snapshot_and_resume");
+        println!("Inside snapshot_and_resume");
         self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
         for handle in self.vm.vcpu_handles.iter(){
             let _ = handle.kill(SIGRTMIN() + 0);
@@ -432,41 +454,44 @@ impl Vmm {
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
 
         // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
-        self.save_snapshot_helper(&snapshot_path[..]).unwrap();
+        self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
         // FIXME: issue here is to get mutable reference to self.
         
         // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
         self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
     }
 
-    pub fn snapshot_and_pause(&mut self, snapshot_path: &str) {
+    pub fn snapshot_and_pause(&mut self, snapshot_path: &str, memory_snapshot_path: &str) {
+        write("Inside snapshot_and_pause");
         // NOTE: 1. Kicking all the vcpus out of their run loop in suspending state
-        // self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
-        // for handle in self.vm.vcpu_handles.iter(){
-        //     let _ = handle.kill(SIGRTMIN() + 0);
-        // }
+        self.vm.vcpu_run_state.set_and_notify(VmRunState::Suspending);
+        for handle in self.vm.vcpu_handles.iter(){
+            let _ = handle.kill(SIGRTMIN() + 0);
+        }
 
-        // for i in 0..self.vm.config.num_vcpus {
-        //     let r = self.vm.vcpu_rx.as_ref().unwrap();
-        //     r.recv().unwrap();
-        //     println!("Received message from {i}th cpu");
-        // }
+        for i in 0..self.vm.config.num_vcpus {
+            let r = self.vm.vcpu_rx.as_ref().unwrap();
+            r.recv().unwrap();
+            println!("Received message from {i}th cpu");
+        }
     
         // FIXME: 2. Saving the vcpu state for all vcpus once all have came out -> Do it in VMM
         // let vcpu_state = self.vm.save_state().unwrap();
 
         // FIXME: 3. Serialize memory and vcpus -> Save to disk in supplied file name
+        self.save_snapshot_helper(&snapshot_path[..], &memory_snapshot_path[..]).unwrap();
 
         // mut self.save_snapshot_helper(&cpu_snapshot_path).unwrap();
         // self.save_snapshot_helper(&snapshot_path[..]).unwrap();
         // FIXME: issue here is to get mutable reference to self.
         
         // NOTE: 4. Set and notify all vcpus to Running state so that they breaks out of their wait loop and resumes
-        // self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
+        self.vm.vcpu_run_state.set_and_notify(VmRunState::Running);        
     }
 
-    pub fn save_snapshot_helper(&mut self, snapshot_path: &str) -> Result<()> {
+    pub fn save_snapshot_helper(&mut self, snapshot_path: &str, memory_snapshot_path: &str) -> Result<()> {
 
+        write("Inside save_snapshot_helper");
         // TODO: map error
         let mut snapshot_file = File::create(snapshot_path).unwrap();
         // snapshot_file.read_to_end(buf)d
@@ -475,16 +500,17 @@ impl Vmm {
 
         let mut mem = vec![0; state_size];
         let mut version_map = VersionMap::new();
-        version_map
-            .new_version() 
-            .set_type_version(VmState::type_id(), 1) 
-            .new_version() 
-            .set_type_version(VmState::type_id(), 1); 
-
+        // version_map
+        //     .new_version() 
+        //     .set_type_version(VmState::type_id(), 1) 
+        //     .new_version() 
+        //     .set_type_version(VmState::type_id(), 1); 
+        
         vm_state
-            .serialize(&mut mem.as_mut_slice(), &version_map, 1)
+            .serialize(&mut mem, &version_map, 1)
             .unwrap();
 
+        std::fs::copy("memory.txt", memory_snapshot_path).unwrap();
         // save vm state and memory state to snapshot file
         serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
         Ok(())
@@ -511,11 +537,11 @@ impl Vmm {
         let guest_memory = Self::get_guest_memory(mem_regions).unwrap();
 
         let mut version_map = VersionMap::new();
-        version_map
-            .new_version()
-            .set_type_version(VmState::type_id(), 1) 
-            .new_version() 
-            .set_type_version(VmState::type_id(),1);
+        // version_map
+        //     .new_version()
+        //     .set_type_version(VmState::type_id(), 1) 
+        //     .new_version() 
+        //     .set_type_version(VmState::type_id(),1);
 
         let mut bytes = Vec::new();
         snapshot_file.read_to_end(&mut bytes).unwrap();
@@ -538,6 +564,8 @@ impl Vmm {
 
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
+
+        write("inside vm.run");
         let load_result = self.load_kernel()?;
         #[cfg(target_arch = "x86_64")]
         let kernel_load_addr = self.compute_kernel_load_addr(&load_result)?;
@@ -557,20 +585,24 @@ impl Vmm {
                 Err(e) => eprintln!("Failed to handle events: {:?}", e),
             }
             // NOTE: checking if need to snapshot or not
+
             let rpc = self.rpc_controller.clone();
             let rpc_controller =rpc.lock().unwrap();
             let cpu_snapshot_path = rpc_controller.cpu_snapshot_path.clone();
             let memory_snapshot_path = rpc_controller.memory_snapshot_path.clone();
             match rpc_controller.which_event() {
                 "PAUSE" => {
+                    write("pause received");
                     self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, false);
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 },
                 "RESUME" => {
+                    write("resume received");
                     self.save_snapshot(cpu_snapshot_path, memory_snapshot_path, true);
                     rpc_controller.pause_or_resume.store(0, Ordering::Relaxed);
                 }
                 _ => {
+                    write("i am eating 5 star.....koi kaam naho hoga");
                     // do nothing, eat 5 star.
                 }
             }

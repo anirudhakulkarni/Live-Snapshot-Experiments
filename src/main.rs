@@ -96,6 +96,7 @@ async fn main() {
                     .await;
                     println!("Exiting RPC Listener");
             });
+            println!("just before vm.run");
             vmm.run().unwrap();
             println!("Exited VMM");
         }
