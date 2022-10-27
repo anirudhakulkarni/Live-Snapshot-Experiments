@@ -260,8 +260,8 @@ impl TryFrom<&str> for BlockConfig {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotConfig {
-    cpu_snapshot_path: String,
-    memory_snapshot_path: String,
+    pub cpu_snapshot_path: String,
+    pub memory_snapshot_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

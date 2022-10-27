@@ -205,9 +205,15 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         exit_handler: EH,
         guest_memory: &M,
     ) -> Result<Self> {
+
+        println!("inside create vm");
+
         let vm_fd = Arc::new(kvm.create_vm().map_err(Error::CreateVm)?);
+
+        println!("got vm_fd");
         let vcpu_run_state = Arc::new(VcpuRunState::default());
 
+        println!("got vcpu run state");
         let vm = KvmVm {
             vcpu_barrier: Arc::new(Barrier::new(config.num_vcpus as usize)),
             config,
@@ -287,8 +293,15 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         // Restoring a VM from a previously saved state needs to happen differently
         // on x86_64 and aarch64.
         // For both, we first need to create the VM fd (from KVM).
+
+        // println!("inside from state {:?}", state.config.);
         let mut vm = Self::create_vm(kvm, state.config.clone(), exit_handler, guest_memory)?;
+
+        println!("got vm from create vm");
+
         let vcpus_state = state.vcpus_state.clone();
+
+        println!("got vcpu states");
         #[cfg(target_arch = "x86_64")]
         {
             // On x86_64, we need to create the in-kernel IRQ chip so we can then create the vCPUs.
@@ -565,6 +578,32 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
                 .spawn(move || {
                     // TODO: Check the result of both vcpu run & kick.
                     let _ = vcpu.run(vcpu_run_addr).unwrap();
+                    println!("Vcpu:{} exiting", id);
+                    let _ = vcpu_exit_handler.kick();
+                    vcpu.run_state.set_and_notify(VmRunState::Exiting);
+                })
+                .map_err(Error::RunVcpus)?;
+            self.vcpu_handles.push(vcpu_handle);
+        }
+
+        Ok(())
+    }
+
+    pub fn resume(&mut self) -> Result<()> {
+        if self.vcpus.len() != self.config.num_vcpus as usize {
+            return Err(Error::RunVcpus(io::Error::from(ErrorKind::InvalidInput)));
+        }
+
+        KvmVcpu::setup_signal_handler().unwrap();
+
+        for (id, mut vcpu) in self.vcpus.drain(..).enumerate() {
+            let vcpu_exit_handler = self.exit_handler.clone();
+            let vcpu_handle = thread::Builder::new()
+                .name(format!("vcpu_{}", id))
+                .spawn(move || {
+                    // TODO: Check the result of both vcpu run & kick.
+                    println!("starting vcpu:{} from rip {}", id, vcpu.vcpu_fd.get_regs().unwrap().rip);
+                    let _ = vcpu.run(Some(GuestAddress(vcpu.vcpu_fd.get_regs().unwrap().rip as u64))).unwrap();
                     println!("Vcpu:{} exiting", id);
                     let _ = vcpu_exit_handler.kick();
                     vcpu.run_state.set_and_notify(VmRunState::Exiting);
