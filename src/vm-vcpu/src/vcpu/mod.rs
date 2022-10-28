@@ -328,7 +328,8 @@ pub struct KvmVcpu {
     config: VcpuConfig,
     run_barrier: Arc<Barrier>,
     pub(crate) run_state: Arc<VcpuRunState>,
-    tx: mpsc::Sender<i32>
+    tx: mpsc::Sender<i32>,
+    is_resume: bool
 }
 
 impl KvmVcpu {
@@ -357,7 +358,8 @@ impl KvmVcpu {
             config,
             run_barrier,
             run_state,
-            tx
+            tx,
+            is_resume: false
         };
 
         #[cfg(target_arch = "x86_64")]
@@ -448,7 +450,8 @@ impl KvmVcpu {
             config: state.config.clone(),
             run_barrier,
             run_state,
-            tx
+            tx,
+            is_resume: true
         };
 
         #[cfg(target_arch = "aarch64")]
@@ -690,6 +693,7 @@ impl KvmVcpu {
         .serialize(&mut mem, &version_map, 1)
         .unwrap();
         println!("cpu rip after suspend: {}",vcpu_state.regs.rip);
+        println!("regs: \n{:?}", self.vcpu_fd.get_regs().unwrap());
         file.write_all(&mem).unwrap();
     }
     /// vCPU emulation loop.
@@ -700,17 +704,20 @@ impl KvmVcpu {
     /// when the IP is specified using the platform dependent registers.
     #[allow(clippy::if_same_then_else)]
     pub fn run(&mut self, instruction_pointer: Option<GuestAddress>) -> Result<()> {
-        println!("im inside run");
-        if let Some(ip) = instruction_pointer {
-            #[cfg(target_arch = "x86_64")]
-            self.configure_regs(ip)?;
-            #[cfg(target_arch = "aarch64")]
-            if self.config.id == 0 {
-                let data = ip.0;
-                let reg_id = arm64_core_reg!(pc);
-                self.vcpu_fd
-                    .set_one_reg(reg_id, data)
-                    .map_err(Error::VcpuSetReg)?;
+        
+        if !self.is_resume {
+            if let Some(ip) = instruction_pointer {
+                println!("im inside run {:?} {}", ip, ip.raw_value());
+                #[cfg(target_arch = "x86_64")]
+                self.configure_regs(ip)?;
+                #[cfg(target_arch = "aarch64")]
+                if self.config.id == 0 {
+                    let data = ip.0;
+                    let reg_id = arm64_core_reg!(pc);
+                    self.vcpu_fd
+                        .set_one_reg(reg_id, data)
+                        .map_err(Error::VcpuSetReg)?;
+                }
             }
         }
         println!("before tls");
@@ -722,11 +729,12 @@ impl KvmVcpu {
 
         println!("before loop");
         'vcpu_run: loop {
+            // println!("----------------------ip: {:?}", self.vcpu_fd.get_regs().unwrap());
             let mut interrupted_by_signal = false;
             match self.vcpu_fd.run() {
                 Ok(exit_reason) => {
                     // counter += 1;
-                    println!("{:?}", exit_reason);
+                    // println!("{:?}", exit_reason);
                     match exit_reason {
                         VcpuExit::Shutdown | VcpuExit::Hlt => {
                             if stdin().lock().set_canon_mode().is_err() {
@@ -843,12 +851,13 @@ impl KvmVcpu {
                         }
                         _ => {
                             debug!("Emulation error: {}", e);
+                            println!("regs: \n{:?}", self.vcpu_fd.get_regs().unwrap());
                             break;
                         }
                     }
                 }
             }
-            println!("checking if interrupted by signal:");
+            // println!("----------------------ip: {:?}", self.vcpu_fd.get_regs().unwrap());
 
             if interrupted_by_signal {
                 self.vcpu_fd.set_kvm_immediate_exit(0);

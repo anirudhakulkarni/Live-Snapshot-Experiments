@@ -319,6 +319,26 @@ pub fn restore_cpu(snapshot_path: &str) -> VmState{
     vm_state
 }
 
+pub fn restore_memory(mem_path: &str) -> GuestMemoryMmap{
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .open(mem_path)
+        .unwrap();
+
+        println!("openned file");
+    
+    let mem_regions = &vec![(
+        GuestAddress(0), 
+        file.metadata().unwrap().len() as usize, 
+        Some(FileOffset::new(file, 0))
+    )];
+
+    get_guest_memory(mem_regions).unwrap()
+}
+
+
+
 // // restore snapshot
 pub fn restore_snapshot(snapshot_path: &str, mem_path: &str) -> std::result::Result<KvmVm<WrappedExitHandler>, vm_vcpu::vm::Error>{
 
@@ -426,6 +446,7 @@ impl TryFrom<VMMConfig> for Vmm {
         let wrapped_exit_handler = WrappedExitHandler::new()?;
 
         let mut is_resume = false;
+
         let vm = if config.snapshot_config.is_none() {
             println!("Brand new VM");
             KvmVm::new(
@@ -656,6 +677,7 @@ impl Vmm {
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
 
+        println!("guest_memory: {:?}", self.guest_memory);
         if !self.is_resume { 
             let load_result = self.load_kernel()?;
             #[cfg(target_arch = "x86_64")]
