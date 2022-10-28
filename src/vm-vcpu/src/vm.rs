@@ -281,7 +281,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         self.gic().restore_state(&state.gic_state, mpidrs)?;
         Ok(())
     }
-
+    
     /// Create a VM from a previously saved state.
     pub fn from_state<M: GuestMemory>(
         kvm: &Kvm,
@@ -321,6 +321,81 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             vm.set_state(state)?;
         }
         Ok(vm)
+    }
+
+    pub fn from_state2<M: GuestMemory>(
+        kvm: &Kvm,
+        state: VmState,
+        guest_memory: &M,
+        exit_handler: EH,
+        bus: Arc<Mutex<IoManager>>,
+        vm_config: VmConfig,
+
+    ) -> Result<Self> {
+
+        let s1 = KvmVm::from_state(
+            kvm, 
+            state, 
+            guest_memory, 
+            exit_handler.clone(),
+            bus.clone(),
+        )?;
+
+        let mut s2 = Self::new(
+            kvm,
+            vm_config,
+            guest_memory,
+            exit_handler,
+            bus,
+        )?;
+
+        s2.config = s1.config;
+        s2.exit_handler = s1.exit_handler;
+        s2.vcpu_handles = s1.vcpu_handles;
+        s2.vcpu_run_state = s1.vcpu_run_state;
+        s2.vcpu_rx = s1.vcpu_rx;
+
+        // println!("============[STATE]===============");
+        // let cpu1 = s1.vcpus[0].save_state().unwrap();
+        // let cpu2 = s2.vcpus[0].save_state().unwrap();
+
+        // println!("lapic :{:?}", cpu1.lapic == cpu2.lapic);
+        // println!("mp_state :{:?}", cpu1.mp_state == cpu2.mp_state);
+        // println!("regs :{:?}", cpu1.regs == cpu2.regs);
+        // println!("run_state: {:?} {:?}", cpu1.run_state.vm_state);
+
+        s2.vcpus[0].config = s1.vcpus[0].config.clone();
+        s2.vcpus[0].device_mgr = s1.vcpus[0].device_mgr.clone();
+        s2.vcpus[0].run_barrier = s1.vcpus[0].run_barrier.clone();
+        s2.vcpus[0].tx = s1.vcpus[0].tx.clone();
+        s2.vcpus[0].run_state = s1.vcpus[0].run_state.clone();
+
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_xsave() == s2.vcpus[0].vcpu_fd.get_xsave());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_regs() == s2.vcpus[0].vcpu_fd.get_regs());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_fpu() == s2.vcpus[0].vcpu_fd.get_fpu());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_lapic() == s2.vcpus[0].vcpu_fd.get_lapic());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_debug_regs() == s2.vcpus[0].vcpu_fd.get_debug_regs());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_mp_state() == s2.vcpus[0].vcpu_fd.get_mp_state());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_xcrs() == s2.vcpus[0].vcpu_fd.get_xcrs());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_vcpu_events() == s2.vcpus[0].vcpu_fd.get_vcpu_events());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_tsc_khz() == s2.vcpus[0].vcpu_fd.get_tsc_khz());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_sregs() == s2.vcpus[0].vcpu_fd.get_sregs());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get_cpuid2(1).unwrap() == s2.vcpus[0].vcpu_fd.get_cpuid2(1).unwrap());
+        // println!("xsave: {:?}", s1.vcpus[0].vcpu_fd.get() == s2.vcpus[0].vcpu_fd.get_sregs());
+
+        s2.vcpus[0].vcpu_fd.set_xsave(&s1.vcpus[0].vcpu_fd.get_xsave().unwrap());
+        s2.vcpus[0].vcpu_fd.set_regs(&s1.vcpus[0].vcpu_fd.get_regs().unwrap());
+        s2.vcpus[0].vcpu_fd.set_fpu(&s1.vcpus[0].vcpu_fd.get_fpu().unwrap());
+        s2.vcpus[0].vcpu_fd.set_lapic(&s1.vcpus[0].vcpu_fd.get_lapic().unwrap());
+        s2.vcpus[0].vcpu_fd.set_debug_regs(&s1.vcpus[0].vcpu_fd.get_debug_regs().unwrap());
+        s2.vcpus[0].vcpu_fd.set_mp_state(s1.vcpus[0].vcpu_fd.get_mp_state().unwrap());
+        s2.vcpus[0].vcpu_fd.set_xcrs(&s1.vcpus[0].vcpu_fd.get_xcrs().unwrap());
+        s2.vcpus[0].vcpu_fd.set_vcpu_events(&s1.vcpus[0].vcpu_fd.get_vcpu_events().unwrap());
+        s2.vcpus[0].vcpu_fd.set_tsc_khz(s1.vcpus[0].vcpu_fd.get_tsc_khz().unwrap());
+        s2.vcpus[0].vcpu_fd.set_sregs(&s1.vcpus[0].vcpu_fd.get_sregs().unwrap());
+
+        Ok(s2)
+
     }
 
     /// Retrieve the associated KVM VM file descriptor.

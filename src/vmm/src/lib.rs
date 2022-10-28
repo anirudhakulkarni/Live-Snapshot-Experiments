@@ -315,7 +315,7 @@ pub fn restore_cpu(snapshot_path: &str) -> VmState{
     // println!("mem len: {} mem: {:?}\n\n\n\n", bytes.len(), bytes);
     // println!("vec: {:?}", bytes);
     let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap();
-    println!("cpu rip after read: {}", vm_state.vcpus_state[0].regs.rip);
+    println!("cpu regs after read: {:?}", vm_state.vcpus_state[0].regs);
     vm_state
 }
 
@@ -453,12 +453,12 @@ impl TryFrom<VMMConfig> for Vmm {
 
         let mut is_resume = false;
 
-        let mut guest_memory;
+        let guest_memory;
         let vm = if config.snapshot_config.is_none() {
             println!("Brand new VM");
             let mem_path = "memory.txt";
-            create_file(mem_path, config.memory_config.size_mib as usize);
-            // println!("out of here");
+            let mem_size = ((config.memory_config.size_mib as u64) << 20) as usize;
+            create_file(mem_path, mem_size);
             guest_memory = Vmm::create_guest_memory(mem_path,&config.memory_config)?;
             KvmVm::new(
                 &kvm,
@@ -480,18 +480,21 @@ impl TryFrom<VMMConfig> for Vmm {
             println!("{:?}",mem_path);
 
             std::fs::copy(mem_path,"memory.txt").unwrap();
+            // let mem_size = ((config.memory_config.size_mib as u64) << 20) as usize;
+            // create_file("memory.txt", mem_size);
             guest_memory = Vmm::create_guest_memory("memory.txt",&config.memory_config)?;
             let vm_state = restore_cpu(&snapshot_path[..]);
             // let meravm = restore_snapshot(&snapshot_path[..], &mem_path[..])?;
             // println!("created vm");
             // meravm
-            KvmVm::from_state(
+            KvmVm::from_state2(
                 &kvm, 
                 vm_state, 
                 &guest_memory, 
                 wrapped_exit_handler.clone(), 
-                device_mgr.clone()
-            )?
+                device_mgr.clone(), 
+                vm_config,
+            )? 
         };
 
         let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber + Send>>>::new()
@@ -700,7 +703,8 @@ impl Vmm {
     /// Run the VMM.
     pub fn run(&mut self) -> Result<()> {
 
-        println!("guest_memory: {:?}", self.guest_memory);
+        // println!("guest_memory: {:?}", self.guest_memory);
+        // println!("regs :{:?}", self.vm.vcpus[0].save_state().unwrap().regs);
         if !self.is_resume { 
             let load_result = self.load_kernel()?;
             #[cfg(target_arch = "x86_64")]
@@ -713,14 +717,25 @@ impl Vmm {
             if stdin().lock().set_raw_mode().is_err() {
                 eprintln!("Failed to set raw mode on terminal. Stdin will echo.");
             }
-    
-    
+            
+            // println!("saving cpu");
+            // self.vm.vcpus[0].configure_regs(kernel_load_addr);
+            self.vm.vcpus[0].write_state();
+            // self.save_cpu("cpu.txt");
+            // println!("saved cpu");
+            self.save_snapshot_helper("cpu1.txt", "mem1.txt").unwrap();
+            println!("saved snapshot1");
+            // println!("regs :{:?}", self.vm.vcpus[0].save_state().unwrap().regs);
             self.vm.run(Some(kernel_load_addr)).map_err(Error::Vm)?;
         }
 
         else {
+
+            // let load_result = self.load_kernel()?;
+            // let kernel_load_addr = self.compute_kernel_load_addr(&load_result)?;
             
-            println!("calling vm resume");
+            // println!("calling vm resume");
+            // self.vm.run(Some(kernel_load_addr)).unwrap();
             self.vm.resume().unwrap(); 
         }
 
@@ -757,6 +772,7 @@ impl Vmm {
                 break;
             }
         }
+        println!("calling shutdown");
         self.vm.shutdown();
         Ok(())
     }
@@ -771,7 +787,6 @@ impl Vmm {
         // Create guest memory from regions.
         // GuestMemoryMmap::from_ranges(&mem_regions)
         //     .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
-
         GuestMemoryMmap::from_ranges_with_files(
             mem_regions
         )

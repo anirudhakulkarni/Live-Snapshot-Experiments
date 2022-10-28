@@ -322,13 +322,13 @@ impl VcpuRunState {
 /// [`vmm-vcpu`](https://github.com/rust-vmm/vmm-vcpu) crate is stabilized.
 pub struct KvmVcpu {
     /// KVM file descriptor for a vCPU.
-    pub(crate) vcpu_fd: VcpuFd,
+    pub vcpu_fd: VcpuFd,
     /// Device manager for bus accesses.
-    device_mgr: Arc<Mutex<IoManager>>,
-    config: VcpuConfig,
-    run_barrier: Arc<Barrier>,
-    pub(crate) run_state: Arc<VcpuRunState>,
-    tx: mpsc::Sender<i32>,
+    pub device_mgr: Arc<Mutex<IoManager>>,
+    pub config: VcpuConfig,
+    pub run_barrier: Arc<Barrier>,
+    pub run_state: Arc<VcpuRunState>,
+    pub tx: mpsc::Sender<i32>,
     is_resume: bool
 }
 
@@ -532,7 +532,7 @@ impl KvmVcpu {
 
     /// Configure regs.
     #[cfg(target_arch = "x86_64")]
-    fn configure_regs(&self, instruction_pointer: GuestAddress) -> Result<()> {
+    pub fn configure_regs(&self, instruction_pointer: GuestAddress) -> Result<()> {
         let regs = kvm_regs {
             // EFLAGS (RFLAGS in 64-bit mode) always has bit 1 set.
             // See https://software.intel.com/sites/default/files/managed/39/c5/325462-sdm-vol-1-2abcd-3abcd.pdf#page=79
@@ -714,7 +714,7 @@ impl KvmVcpu {
     #[allow(clippy::if_same_then_else)]
     pub fn run(&mut self, instruction_pointer: Option<GuestAddress>) -> Result<()> {
         
-        if !self.is_resume {
+        // if !self.is_resume {
             if let Some(ip) = instruction_pointer {
                 println!("im inside run {:?} {}", ip, ip.raw_value());
                 #[cfg(target_arch = "x86_64")]
@@ -728,22 +728,30 @@ impl KvmVcpu {
                         .map_err(Error::VcpuSetReg)?;
                 }
             }
-        }
+        // }
         println!("before tls");
         self.init_tls()?;
 
         println!("before barrier");
         self.run_barrier.wait();
-        // let mut counter = 0;
+        let mut counter = 0;
 
         println!("before loop");
+
         'vcpu_run: loop {
             // println!("----------------------ip: {:?}", self.vcpu_fd.get_regs().unwrap());
             let mut interrupted_by_signal = false;
             match self.vcpu_fd.run() {
                 Ok(exit_reason) => {
-                    // counter += 1;
-                    // println!("{:?}", exit_reason);
+                    counter += 1;
+                    // if (counter%10000 == 0) {
+                    //     println!("counter: {}", counter);
+                    // } 
+                    // if (counter == 40000){
+                    //     println!("=====writing vcpu======");
+                    //     self.write_state();
+                    // }
+                    // println!("Exit reason: {:?}", exit_reason);
                     match exit_reason {
                         VcpuExit::Shutdown | VcpuExit::Hlt => {
                             if stdin().lock().set_canon_mode().is_err() {
@@ -851,6 +859,7 @@ impl KvmVcpu {
                     }
                 }
                 Err(e) => {
+                    println!("Error exit: {:?}",e);
                     // During boot KVM can exit with `EAGAIN`. In that case, do not
                     // terminate the run loop.
                     match e.errno() {
@@ -865,7 +874,11 @@ impl KvmVcpu {
                         }
                     }
                 }
+                _ => {
+                    println!("hello");
+                }
             }
+            // println!("Iske na ki zot");
             // println!("----------------------ip: {:?}", self.vcpu_fd.get_regs().unwrap());
 
             if interrupted_by_signal {
@@ -900,6 +913,7 @@ impl KvmVcpu {
                 }
             }
         }
+        // println!("Iske na ki zot v2");
 
         Ok(())
     }
