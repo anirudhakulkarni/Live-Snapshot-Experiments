@@ -694,6 +694,15 @@ impl KvmVcpu {
         .unwrap();
         println!("cpu rip after suspend: {}",vcpu_state.regs.rip);
         println!("regs: \n{:?}", self.vcpu_fd.get_regs().unwrap());
+
+        // println!("============[STATE]===============");
+        // let cpu_state = self.save_state().unwrap();
+
+        // println!("lapic :{:?}", cpu_state.lapic);
+        // println!("mp_state :{:?}", cpu_state.mp_state);
+        // println!("regs :{:?}", cpu_state.regs);
+
+
         file.write_all(&mem).unwrap();
     }
     /// vCPU emulation loop.

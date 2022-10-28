@@ -319,61 +319,68 @@ pub fn restore_cpu(snapshot_path: &str) -> VmState{
     vm_state
 }
 
-pub fn restore_memory(mem_path: &str) -> GuestMemoryMmap{
-    let mut file = File::options()
-        .read(true)
-        .write(true)
-        .open(mem_path)
-        .unwrap();
+// pub fn restore_memory(mem_path: &str) -> GuestMemoryMmap{
+//     let mut file = File::options()
+//         .read(true)
+//         .write(true)
+//         .open(mem_path)
+//         .unwrap();
 
-        println!("openned file");
+//         println!("openned file");
     
-    let mem_regions = &vec![(
-        GuestAddress(0), 
-        file.metadata().unwrap().len() as usize, 
-        Some(FileOffset::new(file, 0))
-    )];
+//     let mem_regions = &vec![(
+//         GuestAddress(0), 
+//         file.metadata().unwrap().len() as usize, 
+//         Some(FileOffset::new(file, 0))
+//     )];
 
-    get_guest_memory(mem_regions).unwrap()
-}
+//     get_guest_memory(mem_regions).unwrap()
+// }
 
 
 
 // // restore snapshot
-pub fn restore_snapshot(snapshot_path: &str, mem_path: &str) -> std::result::Result<KvmVm<WrappedExitHandler>, vm_vcpu::vm::Error>{
+// pub fn restore_snapshot(snapshot_path: &str, mem_path: &str) -> std::result::Result<KvmVm<WrappedExitHandler>, vm_vcpu::vm::Error>{
 
-    let mem_offset : u64= mem::size_of::<VmState>() as u64;
-    let mut file = File::options()
-        .read(true)
-        .write(true)
-        .open(mem_path)
-        .unwrap();
+//     // let mem_offset : u64= mem::size_of::<VmState>() as u64;
+//     // let mut file = File::options()
+//     //     .read(true)
+//     //     .write(true)
+//     //     .open(mem_path)
+//     //     .unwrap();
 
-        println!("openned file");
+//     //     println!("openned file");
     
-    let mem_regions = &vec![(
-        GuestAddress(0), 
-        file.metadata().unwrap().len() as usize, 
-        Some(FileOffset::new(file, 0))
-    )];
+//     // let mem_regions = &vec![(
+//     //     GuestAddress(0), 
+//     //     file.metadata().unwrap().len() as usize, 
+//     //     Some(FileOffset::new(file, 0))
+//     // )];
 
-    let guest_memory = get_guest_memory(mem_regions).unwrap();
-    let vm_state = restore_cpu(snapshot_path);
+//     // let guest_memory = get_guest_memory(mem_regions).unwrap();
+//     let vm_state = restore_cpu(snapshot_path);
 
-    println!("got vm state");
-    println!("vmstate vcpu len: {}", vm_state.vcpus_state.len());
+//     println!("got vm state");
+//     println!("vmstate vcpu len: {}", vm_state.vcpus_state.len());
 
-    let io_manager = Arc::new(Mutex::new(IoManager::new()));
-    let exit_handler = WrappedExitHandler::new().unwrap();
-    let kvm = Kvm::new().unwrap();
-    println!("created new kvm");
-    KvmVm::from_state(
-        &kvm, 
-        vm_state, 
-        &guest_memory, 
-        exit_handler, 
-        io_manager
-    )
+//     let io_manager = Arc::new(Mutex::new(IoManager::new()));
+//     let exit_handler = WrappedExitHandler::new().unwrap();
+//     let kvm = Kvm::new().unwrap();
+//     println!("created new kvm");
+//     // KvmVm::from_state(
+//     //     &kvm, 
+//     //     vm_state, 
+//     //     &guest_memory, 
+//     //     exit_handler, 
+//     //     io_manager
+//     // )
+// }
+
+fn create_file(name: &str, mem_size: usize) {
+
+    // TODO: Do it with create
+    let mut f = File::create(name).unwrap();
+    f.set_len(mem_size as u64);
 }
 
 
@@ -436,7 +443,6 @@ impl TryFrom<VMMConfig> for Vmm {
         // NOTE: RPC event controller
         let rpc_controller = Arc::new(Mutex::new(RpcController::new()));
 
-        let guest_memory = Vmm::create_guest_memory(&config.memory_config)?;
         let address_allocator = Vmm::create_address_allocator(&config.memory_config)?;
         let device_mgr = Arc::new(Mutex::new(IoManager::new()));
 
@@ -447,8 +453,13 @@ impl TryFrom<VMMConfig> for Vmm {
 
         let mut is_resume = false;
 
+        let mut guest_memory;
         let vm = if config.snapshot_config.is_none() {
             println!("Brand new VM");
+            let mem_path = "memory.txt";
+            create_file(mem_path, config.memory_config.size_mib as usize);
+            // println!("out of here");
+            guest_memory = Vmm::create_guest_memory(mem_path,&config.memory_config)?;
             KvmVm::new(
                 &kvm,
                 vm_config,
@@ -463,12 +474,24 @@ impl TryFrom<VMMConfig> for Vmm {
             let snapshot_path = config.clone().snapshot_config.unwrap().cpu_snapshot_path;
             let mem_path = config.snapshot_config.unwrap().memory_snapshot_path;
             is_resume = true;
+
             println!("Starting to restore");
             println!("{:?}",snapshot_path);
             println!("{:?}",mem_path);
-            let meravm = restore_snapshot(&snapshot_path[..], &mem_path[..])?;
-            println!("created vm");
-            meravm
+
+            std::fs::copy(mem_path,"memory.txt").unwrap();
+            guest_memory = Vmm::create_guest_memory("memory.txt",&config.memory_config)?;
+            let vm_state = restore_cpu(&snapshot_path[..]);
+            // let meravm = restore_snapshot(&snapshot_path[..], &mem_path[..])?;
+            // println!("created vm");
+            // meravm
+            KvmVm::from_state(
+                &kvm, 
+                vm_state, 
+                &guest_memory, 
+                wrapped_exit_handler.clone(), 
+                device_mgr.clone()
+            )?
         };
 
         let mut event_manager = EventManager::<Arc<Mutex<dyn MutEventSubscriber + Send>>>::new()
@@ -741,9 +764,9 @@ impl Vmm {
     
 
     // Create guest memory regions.
-    fn create_guest_memory(memory_config: &MemoryConfig) -> Result<GuestMemoryMmap> {
+    fn create_guest_memory(path: &str, memory_config: &MemoryConfig) -> Result<GuestMemoryMmap> {
         let mem_size = ((memory_config.size_mib as u64) << 20) as usize;
-        let mem_regions = Vmm::create_memory_regions(mem_size);
+        let mem_regions = Vmm::create_memory_regions(path, mem_size);
 
         // Create guest memory from regions.
         // GuestMemoryMmap::from_ranges(&mem_regions)
@@ -755,7 +778,7 @@ impl Vmm {
         .map_err(|e| Error::Memory(MemoryError::VmMemory(e)))
     }
 
-    fn create_memory_regions(mem_size: usize) -> Vec<(GuestAddress, usize, Option<FileOffset>)> {
+    fn create_memory_regions(path: &str, mem_size: usize) -> Vec<(GuestAddress, usize, Option<FileOffset>)> {
         #[cfg(target_arch = "x86_64")]
         // On x86_64, they surround the MMIO gap (dedicated space for MMIO device slots) if the
         // configured memory size exceeds the latter's starting address.
@@ -764,12 +787,13 @@ impl Vmm {
         match mem_size.checked_sub(MMIO_GAP_START as usize) {
             // Guest memory fits before the MMIO gap.
             None | Some(0) =>
-                vec![(GuestAddress(0), mem_size, Some(Self::create_file("memory.txt", mem_size, 0).unwrap()))],
+                vec![(GuestAddress(0), mem_size, Some(Self::get_file_offset(path).unwrap()))],
             // Guest memory extends beyond the MMIO gap.
             Some(remaining) => 
             vec![
-                (GuestAddress(0), MMIO_GAP_START as usize, Some(Self::create_file("memory.txt", mem_size, 0).unwrap())),
-                (GuestAddress(MMIO_GAP_END), remaining, Some(Self::create_file("memory_mmio.txt", mem_size, 0).unwrap())),
+                (GuestAddress(0), MMIO_GAP_START as usize, Some(Self::get_file_offset(path).unwrap())),
+                // FIXME: path wrong
+                (GuestAddress(MMIO_GAP_END), remaining, Some(Self::get_file_offset(path).unwrap())),
             ],
         }
 
@@ -777,16 +801,13 @@ impl Vmm {
         vec![(GuestAddress(AARCH64_PHYS_MEM_START), mem_size)]
     }
 
-    fn create_file(name: &str, mem_size: usize, start : u64) ->  Result<FileOffset>  {
-
-        // TODO: Do it with create
-        let mut f = File::options()
+    fn get_file_offset(name: &str) ->  Result<FileOffset> {
+        let f = File::options()
         .read(true)
         .write(true)
         .open(name)
         .unwrap();
-        f.set_len(mem_size as u64);
-        Ok(FileOffset::new(f, start))
+        Ok(FileOffset::new(f,0))
     }
 
     fn create_address_allocator(memory_config: &MemoryConfig) -> Result<AddressAllocator> {

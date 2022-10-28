@@ -605,11 +605,22 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             println!("[{}]: inside loop", id);
             let vcpu_exit_handler = self.exit_handler.clone();
             println!("[{}]: got eh", id);
+
+            // println!("============[STATE]===============");
+            // let cpu_state = vcpu.save_state().unwrap();
+
+            // println!("lapic :{:?}", cpu_state.lapic);
+            // println!("mp_state :{:?}", cpu_state.mp_state);
+            // println!("regs :{:?}", cpu_state.regs);
+            // println!("run_state: {:?}", vcpu.run_state.vm_state);
+
+
             let vcpu_handle = thread::Builder::new()
                 .name(format!("vcpu_{}", id))
                 .spawn(move || {
                     // TODO: Check the result of both vcpu run & kick.
                     let rip = vcpu.vcpu_fd.get_regs().unwrap().rip;
+                    // let rip = 1049088;
                     println!("starting vcpu:{} from rip {}", id, rip);
                     let _ = vcpu.run(Some(GuestAddress(rip as u64))).unwrap();
                     println!("Vcpu:{} exiting", id);
