@@ -312,8 +312,11 @@ pub fn restore_cpu(snapshot_path: &str) -> VmState{
     let mut bytes = Vec::new();
 
     snapshot_file.read_to_end(&mut bytes).unwrap();
+    // println!("mem len: {} mem: {:?}\n\n\n\n", bytes.len(), bytes);
     // println!("vec: {:?}", bytes);
-    VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap()
+    let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap();
+    println!("cpu rip after read: {}", vm_state.vcpus_state[0].regs.rip);
+    vm_state
 }
 
 // // restore snapshot
@@ -338,6 +341,7 @@ pub fn restore_snapshot(snapshot_path: &str, mem_path: &str) -> std::result::Res
     let vm_state = restore_cpu(snapshot_path);
 
     println!("got vm state");
+    println!("vmstate vcpu len: {}", vm_state.vcpus_state.len());
 
     let io_manager = Arc::new(Mutex::new(IoManager::new()));
     let exit_handler = WrappedExitHandler::new().unwrap();
@@ -596,14 +600,16 @@ impl Vmm {
 
         let mut snapshot_file = File::create(snapshot_path).unwrap();
         let vm_state = self.vm.save_state().unwrap();
+
+        println!("cpu rip before saving: {}", vm_state.vcpus_state[0].regs.rip);
         println!("vcpus len before saving: {:?}",self.vm.vcpus.len());
         println!("vcpustate len before saving : {:?}", vm_state.vcpus_state.len());
 
         // let bytes = unsafe { std::mem::transmute::<VmState, [u8; std::mem::size_of::<VmState>()]>(vm_state) };
         // snapshot_file.write_all(&bytes).unwrap();
-        let state_size = mem::size_of::<VmState>();
+        // let state_size = mem::size_of::<VmState>();
 
-        let mut mem = vec![0; state_size];
+        let mut mem = Vec::new();
         let mut version_map = VersionMap::new();
         // version_map
         //     .new_version() 
@@ -611,12 +617,27 @@ impl Vmm {
         //     .new_version() 
         //     .set_type_version(VmState::type_id(), 1); 
 
+
         vm_state
             .serialize(&mut mem, &version_map, 1)
             .unwrap();
 
+        // println!("mem len: {} mem: {:?}\n\n\n\n", mem.len(), mem);
+
         // serde_json::to_writer(&mut snapshot_file, &mem).unwrap();
         snapshot_file.write_all(&mem).unwrap(); 
+
+        // println!("state saved");
+
+        // let mut snapshot_file = File::open(snapshot_path).unwrap();
+        // let mut bytes = Vec::new();
+        // snapshot_file.read(&mut bytes).unwrap();
+        // snapshot_file.read_to_end(&mut bytes).unwrap();
+        // // println!("bytes len: {} bytes: {:?}", bytes.len(), bytes);
+        // let vm_state = VmState::deserialize(&mut bytes.as_slice(), &version_map, 1).unwrap();
+        // println!("vcpustate len after saving : {:?}", vm_state.vcpus_state.len());
+
+
     }
     
 

@@ -676,6 +676,22 @@ impl KvmVcpu {
         });
     }
 
+    pub fn write_state(&self) {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open("suspend.txt")
+            .unwrap();
+        // write vcpu state to file
+        let mut mem = Vec::new();
+        let vcpu_state = self.save_state().unwrap();
+        let mut version_map = VersionMap::new();
+        vcpu_state
+        .serialize(&mut mem, &version_map, 1)
+        .unwrap();
+        println!("cpu rip after suspend: {}",vcpu_state.regs.rip);
+        file.write_all(&mem).unwrap();
+    }
     /// vCPU emulation loop.
     ///
     /// # Arguments
@@ -684,6 +700,7 @@ impl KvmVcpu {
     /// when the IP is specified using the platform dependent registers.
     #[allow(clippy::if_same_then_else)]
     pub fn run(&mut self, instruction_pointer: Option<GuestAddress>) -> Result<()> {
+        println!("im inside run");
         if let Some(ip) = instruction_pointer {
             #[cfg(target_arch = "x86_64")]
             self.configure_regs(ip)?;
@@ -696,17 +713,20 @@ impl KvmVcpu {
                     .map_err(Error::VcpuSetReg)?;
             }
         }
+        println!("before tls");
         self.init_tls()?;
 
+        println!("before barrier");
         self.run_barrier.wait();
         // let mut counter = 0;
-        
+
+        println!("before loop");
         'vcpu_run: loop {
             let mut interrupted_by_signal = false;
             match self.vcpu_fd.run() {
                 Ok(exit_reason) => {
                     // counter += 1;
-                    // println!("{:?}", exit_reason);
+                    println!("{:?}", exit_reason);
                     match exit_reason {
                         VcpuExit::Shutdown | VcpuExit::Hlt => {
                             if stdin().lock().set_canon_mode().is_err() {
@@ -828,6 +848,7 @@ impl KvmVcpu {
                     }
                 }
             }
+            println!("checking if interrupted by signal:");
 
             if interrupted_by_signal {
                 self.vcpu_fd.set_kvm_immediate_exit(0);
@@ -842,27 +863,13 @@ impl KvmVcpu {
                         }
                         // The VM is suspending. It will send the message to VM to let it know I'm suspended and then I will sleep on condvar
                         VmRunState::Suspending => {
-                            // create file if not exists
-                            let mut file = OpenOptions::new()
-                                .write(true)
-                                .create(true)
-                                .open("suspend.txt")
-                                .unwrap();
-                            let state_size= mem::size_of::<VcpuState>();
-                            // write vcpu state to file
-                            let mut mem = vec![0; state_size];
-                            let vcpu_state = self.save_state().unwrap();
-                            let mut version_map = VersionMap::new();
-                            vcpu_state
-                            .serialize(&mut mem, &version_map, 1)
-                            .unwrap();
-                            file.write_all(&mem).unwrap();
-                    
-
+                            // create file if not exists    
+                            self.write_state();
                             self.tx.send(self.config.id.into()).unwrap();
 
                         }
                         VmRunState::Exiting => {
+                            self.write_state();
                             self.tx.send(self.config.id.into()).unwrap();
                             // The VM is exiting. We also exit from this VCPU thread.
                             break 'vcpu_run;
