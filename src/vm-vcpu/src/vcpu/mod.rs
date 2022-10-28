@@ -329,7 +329,7 @@ pub struct KvmVcpu {
     pub run_barrier: Arc<Barrier>,
     pub run_state: Arc<VcpuRunState>,
     pub tx: mpsc::Sender<i32>,
-    is_resume: bool
+    pub is_resume: bool
 }
 
 impl KvmVcpu {
@@ -384,7 +384,7 @@ impl KvmVcpu {
     // Set the state of this `KvmVcpu`. Errors returned from this function
     // MUST not be ignored because they can lead to undefined behavior when
     // the state of the vCPU is only partially set.
-    fn set_state(&mut self, state: VcpuState) -> Result<()> {
+    pub fn set_state(&mut self, state: VcpuState) -> Result<()> {
         self.vcpu_fd
             .set_cpuid2(&state.cpuid)
             .map_err(Error::VcpuSetCpuid)?;
@@ -714,7 +714,7 @@ impl KvmVcpu {
     #[allow(clippy::if_same_then_else)]
     pub fn run(&mut self, instruction_pointer: Option<GuestAddress>) -> Result<()> {
         
-        // if !self.is_resume {
+        if !self.is_resume {
             if let Some(ip) = instruction_pointer {
                 println!("im inside run {:?} {}", ip, ip.raw_value());
                 #[cfg(target_arch = "x86_64")]
@@ -728,7 +728,7 @@ impl KvmVcpu {
                         .map_err(Error::VcpuSetReg)?;
                 }
             }
-        // }
+        }
         println!("before tls");
         self.init_tls()?;
 

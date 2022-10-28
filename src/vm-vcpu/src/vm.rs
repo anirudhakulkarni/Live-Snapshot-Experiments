@@ -346,7 +346,7 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
             vm_config,
             guest_memory,
             exit_handler,
-            bus,
+            bus.clone(),
         )?;
 
         s2.config = s1.config;
@@ -388,12 +388,21 @@ impl<EH: 'static + ExitHandler + Send> KvmVm<EH> {
         s2.vcpus[0].vcpu_fd.set_fpu(&s1.vcpus[0].vcpu_fd.get_fpu().unwrap());
         s2.vcpus[0].vcpu_fd.set_lapic(&s1.vcpus[0].vcpu_fd.get_lapic().unwrap());
         s2.vcpus[0].vcpu_fd.set_debug_regs(&s1.vcpus[0].vcpu_fd.get_debug_regs().unwrap());
-        s2.vcpus[0].vcpu_fd.set_mp_state(s1.vcpus[0].vcpu_fd.get_mp_state().unwrap());
+        // s2.vcpus[0].vcpu_fd.set_mp_state(s1.vcpus[0].vcpu_fd.get_mp_state().unwrap());
         s2.vcpus[0].vcpu_fd.set_xcrs(&s1.vcpus[0].vcpu_fd.get_xcrs().unwrap());
         s2.vcpus[0].vcpu_fd.set_vcpu_events(&s1.vcpus[0].vcpu_fd.get_vcpu_events().unwrap());
         s2.vcpus[0].vcpu_fd.set_tsc_khz(s1.vcpus[0].vcpu_fd.get_tsc_khz().unwrap());
         s2.vcpus[0].vcpu_fd.set_sregs(&s1.vcpus[0].vcpu_fd.get_sregs().unwrap());
-
+        // s2.vcpus[0] = KvmVcpu::from_state::<M>(
+        //     &s1.fd, 
+        //     bus, 
+        //     s1.vcpus[0].save_state().unwrap(), 
+        //     s1.vcpus[0].run_barrier.clone(), 
+        //     s1.vcpus[0].run_state.clone(), 
+        //     s1.vcpus[0].tx.clone()
+        // ).unwrap();
+        // s2.vcpus[0].set_state(s1.vcpus[0].save_state().unwrap());
+        s2.vcpus[0].is_resume = true;
         Ok(s2)
 
     }
